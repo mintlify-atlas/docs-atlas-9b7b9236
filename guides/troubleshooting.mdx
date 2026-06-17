@@ -1,0 +1,387 @@
+---
+title: "Troubleshoot Common SSRL-ECG Installation and Runtime Issues"
+sidebarTitle: "Troubleshooting"
+description: "Step-by-step fixes for the most frequent SSRL-ECG errors: missing modules, tensor shape mismatches, CUDA OOM, slow training, and checkpoint key errors."
+---
+
+Most problems encountered when setting up or running SSRL-ECG fall into one of a handful of categories: an installation shortcut that skips editable-mode setup, a tensor-shape assumption that differs between a single sample and a full batch, or a GPU configuration that silently falls back to CPU. This page collects every known issue and its verified fix, drawn directly from the project's source code and README.
+
+<Note>
+  There is a critical distinction between these two installation commands:
+
+  | Command | What it does |
+  |---------|-------------|
+  | `pip install -r requirements.txt` | Installs Python dependencies only. The `ssrl_ecg` package itself is **not** registered with Python's import system. |
+  | `pip install -e .` | Installs dependencies **and** registers `ssrl_ecg` as an editable package, making `import ssrl_ecg` work from any working directory. |
+
+  Always use `pip install -e .`. Running `requirements.txt` alone is the root cause of the majority of `ModuleNotFoundError` reports.
+</Note>
+
+<Tip>
+  Before starting a long training run, verify GPU availability in three seconds:
+
+  ```bash
+  python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+  ```
+
+  If this prints `CUDA available: False`, all training will run on CPU and will be orders of magnitude slower. Resolve the CUDA issue first — see the "Slow training / CPU fallback" entry below.
+</Tip>
+
+---
+
+## Common Issues
+
+<Accordion title="ModuleNotFoundError: No module named 'ssrl_ecg'">
+  **Symptom**
+
+  ```
+  ModuleNotFoundError: No module named 'ssrl_ecg'
+  ```
+
+  This error appears when you try to run any training or evaluation script without having installed the package in editable mode.
+
+  **Root cause**
+
+  Running `pip install -r requirements.txt` installs third-party dependencies (PyTorch, NumPy, etc.) but does not register the local `ssrl_ecg` package on the Python path.
+
+  **Fix**
+
+  From the repository root, run:
+
+  <Tabs>
+    <Tab title="Linux / macOS">
+      ```bash
+      pip install -e .
+      ```
+    </Tab>
+    <Tab title="Windows (PowerShell)">
+      ```powershell
+      pip install -e .
+      ```
+    </Tab>
+  </Tabs>
+
+  The `-e` flag installs the package in *editable* (development) mode. Python resolves imports directly from the `src/` directory, so any local edits take effect immediately without reinstalling.
+
+  **Verify the fix**
+
+  ```bash
+  python -c "import ssrl_ecg; print('Package found at:', ssrl_ecg.__file__)"
+  ```
+</Accordion>
+
+<Accordion title="Tensor shape errors in augmentations">
+  **Symptom**
+
+  ```
+  RuntimeError: Expected 3D input, got 2D input of shape [12, 1000]
+  ```
+
+  or similar shape mismatches when applying `ECGAugmentations`.
+
+  **Root cause**
+
+  ECG data arrives in two shapes depending on context:
+
+  - **Single sample** (e.g., during inference or manual testing): `(channels, time)` — a 2D tensor.
+  - **Batch** (during training): `(batch, channels, time)` — a 3D tensor.
+
+  Older versions of the augmentation pipeline assumed 3D input and crashed on single samples.
+
+  **Fix**
+
+  No code change is required. The current `ECGAugmentations` class automatically detects input dimensionality and handles both cases:
+
+  - **2D input** `(channels, time)` → internally promoted to `(1, channels, time)`, augmented, then squeezed back to `(channels, time)`.
+  - **3D input** `(batch, channels, time)` → processed as-is.
+
+  The output shape always matches the input shape.
+
+  **If you see the error anyway**, confirm that you are running the installed editable package and not a stale cached `.pyc` file:
+
+  ```bash
+  pip install -e .  # re-install to pick up latest source
+  ```
+</Accordion>
+
+<Accordion title="CUDA out of memory (OOM)">
+  **Symptom**
+
+  ```
+  torch.cuda.OutOfMemoryError: CUDA out of memory.
+  Tried to allocate ... MiB
+  ```
+
+  **Root cause**
+
+  The default batch sizes (`--batch-size 128` for SimCLR, `--batch-size 256` for BYOL) are tuned for GPUs with ≥ 16 GB VRAM. Smaller cards will OOM during the forward pass.
+
+  **Fix**
+
+  Reduce the batch size. Start at 64 and halve again if necessary:
+
+  <Tabs>
+    <Tab title="SimCLR">
+      ```bash
+      python -m ssrl_ecg.train_ssl_simclr \
+        --data-root data/PTB-XL \
+        --epochs 20 \
+        --batch-size 64 \
+        --temperature 0.07 \
+        --seed 42 \
+        --out checkpoints/ssl_simclr_enhanced.pt
+      ```
+    </Tab>
+    <Tab title="BYOL">
+      ```bash
+      python -m ssrl_ecg.train_ssl_byol \
+        --data-root data/PTB-XL \
+        --epochs 30 \
+        --batch-size 64 \
+        --momentum-tau 0.99 \
+        --seed 42 \
+        --out checkpoints/ssl_byol_enhanced.pt
+      ```
+    </Tab>
+    <Tab title="Supervised / Fine-tune">
+      ```bash
+      python -m ssrl_ecg.train_supervised \
+        --data-root data/PTB-XL \
+        --epochs 30 \
+        --batch-size 32 \
+        --label-fraction 0.1 \
+        --seed 42 \
+        --out checkpoints/supervised_focal_oversample.pt
+      ```
+    </Tab>
+  </Tabs>
+
+  <Warning>
+    Reducing batch size below 32 can destabilise contrastive learning (SimCLR, BYOL) because the in-batch negative pairs become too few. If 32 still causes OOM, consider gradient accumulation rather than further reducing the logical batch size.
+  </Warning>
+
+  `choose_device()` also pre-allocates 95 % of available GPU memory and clears the cache before training begins (`torch.cuda.empty_cache()`), which helps avoid fragmentation-related OOM on repeated short runs in the same process.
+</Accordion>
+
+<Accordion title="Slow training / CPU fallback">
+  **Symptom**
+
+  Training appears to run but is extremely slow — epochs take minutes instead of seconds, or `choose_device()` prints `[WARNING] No CUDA-capable GPU detected!`.
+
+  **Diagnosis**
+
+  Run both checks before starting any long experiment:
+
+  ```bash
+  # 1. Check GPU process utilisation in real time
+  nvidia-smi
+
+  # 2. Verify PyTorch can see a CUDA device
+  python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+  ```
+
+  **Common causes and fixes**
+
+  | Cause | Fix |
+  |-------|-----|
+  | CUDA toolkit not installed or wrong version | Install CUDA matching your PyTorch build (`torch.__version__` shows the expected CUDA suffix, e.g., `+cu121`) |
+  | PyTorch CPU-only wheel installed | Reinstall with the correct CUDA wheel from [pytorch.org](https://pytorch.org/get-started/locally/) |
+  | GPU in use by another process | Check `nvidia-smi` for competing processes and free VRAM |
+  | Virtual environment mismatch | Ensure the venv with `pip install -e .` is active |
+
+  **Expected `choose_device()` output when GPU is detected**
+
+  ```
+  [GPU CONFIGURATION]
+    Device: NVIDIA GeForce RTX ...
+    GPU Memory: 16.0 GB
+    CUDA Version: 12.1
+    cuDNN Version: 8902
+    PyTorch Version: 2.x.x
+    [STATUS] Using GPU mode
+  ```
+
+  If you see the CPU fallback message instead, address the CUDA installation before training.
+</Accordion>
+
+<Accordion title="Dataset FileNotFoundError">
+  **Symptom**
+
+  ```
+  FileNotFoundError: [Errno 2] No such file or directory: 'data/PTB-XL/ptbxl_database.csv'
+  ```
+
+  **Root cause**
+
+  The data loader expects a specific folder structure under the path passed to `--data-root`. If the PTB-XL archive was extracted to a different location, or the CSV metadata files are missing, the dataset class cannot initialise.
+
+  **Required folder layout**
+
+  ```
+  data/
+  └── PTB-XL/
+      ├── ptbxl_database.csv        ← required
+      ├── scp_statements.csv        ← required
+      ├── records100/
+      │   ├── 00000/
+      │   │   ├── *.hea
+      │   │   └── *.dat
+      │   └── ...
+      └── records500/
+          └── ...
+  ```
+
+  **Fix**
+
+  1. Download PTB-XL from PhysioNet and extract it so that `ptbxl_database.csv` lives directly inside the folder you pass to `--data-root`.
+  2. Pass the correct path explicitly:
+
+     ```bash
+     python -m ssrl_ecg.train_ssl_simclr \
+       --data-root /path/to/your/PTB-XL \
+       --epochs 20
+     ```
+
+  3. Verify the structure before running training:
+
+     ```bash
+     python -m ssrl_ecg.analyze_datasets --ptbxl-root data/PTB-XL
+     ```
+
+     A successful run prints class distribution and split statistics, confirming the dataset is readable.
+</Accordion>
+
+<Accordion title="Checkpoint loading errors — wrong key">
+  **Symptom**
+
+  ```
+  RuntimeError: Error(s) in loading state_dict for ECGClassifier:
+    Missing key(s) in state_dict: "encoder.conv1.weight", ...
+  ```
+
+  or
+
+  ```
+  KeyError: 'encoder'
+  ```
+
+  **Root cause**
+
+  SSRL-ECG uses two different checkpoint schemas depending on the training stage:
+
+  | Script | Saved key | Contains |
+  |--------|-----------|----------|
+  | `train_ssl_simclr.py`, `train_ssl_byol.py` | `encoder` | Encoder weights only (no projection head) |
+  | `train_supervised.py`, `train_finetune.py`, `train_supervised_multiseed.py` | `model` | Full `ECGClassifier` state dict |
+
+  Passing an SSL checkpoint to a script that expects a classifier checkpoint (or vice versa) raises a key error.
+
+  **Fix**
+
+  Inspect the checkpoint before loading:
+
+  ```python
+  import torch
+  ckpt = torch.load("checkpoints/my_checkpoint.pt", map_location="cpu")
+  print(ckpt.keys())  # should print dict_keys(['encoder']) or dict_keys(['model'])
+  ```
+
+  Then load with the correct key:
+
+  ```python
+  # For SSL encoder checkpoints
+  encoder.load_state_dict(ckpt["encoder"])
+
+  # For classifier checkpoints (supervised / fine-tuned)
+  classifier.load_state_dict(ckpt["model"])
+  ```
+
+  <Info>
+    The fine-tuning script (`train_finetune.py`) specifically reads the `encoder`
+    key from the SSL checkpoint and wraps it in a new `ECGClassifier` — it does
+    not expect a `model` key at the input stage.
+  </Info>
+</Accordion>
+
+<Accordion title="Windows vs Linux command syntax">
+  **Symptom**
+
+  Multi-line commands from the README fail on Windows with a parse error, or commands written for PowerShell fail on Linux/macOS.
+
+  **Root cause**
+
+  The two platforms use different characters to continue a command across multiple lines:
+
+  | Platform | Line-continuation character | Example |
+  |----------|-----------------------------|---------|
+  | Linux / macOS (bash) | `\` (backslash) | `python script.py \` |
+  | Windows (PowerShell) | `` ` `` (backtick) | ``python script.py ` `` |
+
+  **Examples**
+
+  <Tabs>
+    <Tab title="Linux / macOS (bash)">
+      ```bash
+      python -m ssrl_ecg.train_ssl_simclr \
+        --data-root data/PTB-XL \
+        --epochs 20 \
+        --batch-size 128 \
+        --temperature 0.07 \
+        --seed 42 \
+        --out checkpoints/ssl_simclr_enhanced.pt
+      ```
+    </Tab>
+    <Tab title="Windows (PowerShell)">
+      ```powershell
+      python -m ssrl_ecg.train_ssl_simclr `
+        --data-root data/PTB-XL `
+        --epochs 20 `
+        --batch-size 128 `
+        --temperature 0.07 `
+        --seed 42 `
+        --out checkpoints/ssl_simclr_enhanced.pt
+      ```
+    </Tab>
+    <Tab title="Single line (any platform)">
+      ```bash
+      python -m ssrl_ecg.train_ssl_simclr --data-root data/PTB-XL --epochs 20 --batch-size 128 --temperature 0.07 --seed 42 --out checkpoints/ssl_simclr_enhanced.pt
+      ```
+    </Tab>
+  </Tabs>
+
+  <Tip>
+    When in doubt, collapse the command to a single line (the "any platform" tab above). Single-line commands work identically on bash, zsh, and PowerShell.
+  </Tip>
+</Accordion>
+
+---
+
+## Quick-Reference Diagnostic Commands
+
+<CardGroup cols={2}>
+  <Card title="Check package installation" icon="box">
+    ```bash
+    python -c "import ssrl_ecg; print(ssrl_ecg.__file__)"
+    ```
+    If this raises `ModuleNotFoundError`, run `pip install -e .`.
+  </Card>
+  <Card title="Verify CUDA availability" icon="microchip">
+    ```bash
+    python -c "import torch; print(torch.cuda.is_available())"
+    ```
+    Should print `True` before starting any GPU training.
+  </Card>
+  <Card title="Inspect GPU utilisation" icon="gauge-high">
+    ```bash
+    nvidia-smi
+    ```
+    Confirms the GPU is visible to the OS and shows free VRAM.
+  </Card>
+  <Card title="Validate dataset layout" icon="folder-open">
+    ```bash
+    python -m ssrl_ecg.analyze_datasets \
+      --ptbxl-root data/PTB-XL
+    ```
+    Prints class distribution if the folder structure is correct.
+  </Card>
+</CardGroup>

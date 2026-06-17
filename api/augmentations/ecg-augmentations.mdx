@@ -1,0 +1,213 @@
+---
+title: "ECGAugmentations: Domain-Adaptive ECG Signal Augmentation"
+sidebarTitle: "ECGAugmentations"
+description: "Full reference for ECGAugmentations — dual-view augmentation combining weak and strong cardiac-domain transforms for self-supervised ECG pretraining."
+---
+
+The `ECGAugmentations` class is the core augmentation engine in SSRL-ECG. It generates two independently augmented views of the same ECG signal for contrastive learning objectives such as SimCLR and BYOL. Every transform is designed around the physiological and recording properties of 12-lead ECGs, ensuring that augmented views remain medically plausible while being sufficiently diverse to drive representation learning.
+
+## Class Overview
+
+```python
+from ssrl_ecg.augmentations import ECGAugmentations
+```
+
+`ECGAugmentations` applies a two-stage pipeline to each input signal: a **weak** stage (always applied, small perturbations) followed by a **strong** stage (applied with probability `prob_strong`, larger structural transforms). The same pipeline is run twice on every input to produce two independent views, `x1` and `x2`.
+
+## Constructor
+
+```python
+ECGAugmentations(signal_length=5000, sampling_rate=500, prob_strong=0.8)
+```
+
+<ParamField path="signal_length" type="int" default="5000">
+  Number of time-steps in the ECG signal. PTB-XL recordings at 500 Hz for 10 seconds yield `5000` samples. Adjust to match your dataset's temporal resolution.
+</ParamField>
+
+<ParamField path="sampling_rate" type="int" default="500">
+  Sampling rate in Hz. Used by frequency-domain augmentations (e.g. `_augment_bandpass_variation`) to correctly map frequency bins to physical units. Set to `100` for PTB-XL's low-resolution variant.
+</ParamField>
+
+<ParamField path="prob_strong" type="float" default="0.8">
+  Probability gate controlling whether the strong augmentation block runs on any given call. At `0.8`, roughly four in five augmentation calls include the full set of structural transforms. Reduce to `0.5` during development for faster iteration.
+</ParamField>
+
+## `__call__`
+
+```python
+x1, x2 = aug(x)
+```
+
+Produces two independently augmented views of the input signal by running the full weak + strong pipeline twice on cloned copies of `x`.
+
+<ParamField path="x" type="torch.Tensor" required>
+  Input ECG signal. Accepts either:
+  - **2D** — `[channels, time]` for a single sample (e.g. `[12, 5000]`)
+  - **3D** — `[batch, channels, time]` for a mini-batch (e.g. `[32, 12, 5000]`)
+
+  The tensor is cloned before augmentation; the original is never modified.
+</ParamField>
+
+**Returns**
+
+<ResponseField name="x1" type="torch.Tensor">
+  First augmented view. Shape matches the input exactly: `[channels, time]` if a 2D tensor was passed, `[batch, channels, time]` if 3D. Values are clamped to `[-10, 10]`.
+</ResponseField>
+
+<ResponseField name="x2" type="torch.Tensor">
+  Second augmented view, produced by an independent pass through the same pipeline. Stochastic operations ensure `x1 ≠ x2` in virtually all cases.
+</ResponseField>
+
+<Note>
+  **Automatic 2D / 3D handling.** When a 2D `[channels, time]` tensor is passed, the class silently inserts a batch dimension internally (`unsqueeze(0)`) so that all augmentations operate on the canonical 3D shape, then squeezes it back before returning. This means you can use the same augmenter in both dataset `__getitem__` methods (single sample) and collated batch pipelines without any code changes.
+</Note>
+
+## Usage Example
+
+```python
+from ssrl_ecg.augmentations import ECGAugmentations
+import torch
+
+aug = ECGAugmentations(signal_length=5000, sampling_rate=500, prob_strong=0.8)
+
+# Single sample (2D input)
+x_single = torch.randn(12, 5000)
+x1, x2 = aug(x_single)
+print(x1.shape)  # [12, 5000]
+
+# Batch (3D input)
+x_batch = torch.randn(32, 12, 5000)
+x1, x2 = aug(x_batch)
+print(x1.shape)  # [32, 12, 5000]
+
+# Confirm views differ
+print(torch.allclose(x1, x2))  # False
+print(f"Value range: [{x1.min():.3f}, {x1.max():.3f}]")  # clamped to [-10, 10]
+```
+
+<Tip>
+  Set `prob_strong=0.5` during development and architecture search to cut augmentation time roughly in half. Restore to `0.8` for full pretraining runs where diversity of views is critical for learning strong representations.
+</Tip>
+
+## Augmentation Pipeline
+
+The pipeline is divided into two sequential stages. The weak stage always runs; the strong stage runs with probability `prob_strong`.
+
+<Tabs>
+  <Tab title="Weak Augmentations">
+    Weak augmentations are applied unconditionally on every call. They introduce small perturbations that mimic natural recording variability without altering the underlying cardiac signal structure.
+
+    | Method | Probability | Simulates |
+    |---|---|---|
+    | `_weak_jitter` | 0.9 | Sensor noise, electrical interference — adds Gaussian noise with `std=0.03` |
+    | `_weak_scaling` | 0.8 | Recording gain drift across sessions — multiplies the whole signal by `1 ± 15%` |
+    | `_augment_channel_noise` | 0.6 | Differing signal quality across ECG leads — adds per-channel Gaussian noise at 0.5–2% of each lead's standard deviation |
+  </Tab>
+  <Tab title="Strong Augmentations">
+    Strong augmentations run inside the `prob_strong` gate and apply larger structural transforms. Mixing augmentations (`_augment_mixup`, `_augment_cutmix`) silently no-op when the batch dimension is 1.
+
+    | Method | Probability | Simulates |
+    |---|---|---|
+    | `_time_warp` | 0.5 | Temporal distortions, heart rate variation — non-linear resampling via random control-point warping |
+    | `_augment_time_shift` | 0.7 | Recording start delay, RR-interval jitter — circular shift of ±10% of signal length |
+    | `_augment_dropout` | 0.5 | Signal interruptions, sensor failures — zeroes out contiguous temporal segments totalling ~10% of signal |
+    | `_augment_bandpass_variation` | 0.5 | Device-specific frequency response (0.05–250 Hz range) — FFT-domain soft bandpass with random corner frequencies |
+    | `_augment_segment_cropping` | 0.5 | Missing data, electrode contact loss — removes 10–30% of the signal and fills the gap with linear interpolation |
+    | `_augment_mixup` | 0.4 | Averaged multi-session ECG readings — Beta(α, α) linear blend of two samples; requires batch > 1 |
+    | `_augment_cutmix` | 0.5 | Electrode switching or stitched recordings — replaces a random temporal segment with the matching segment from another sample; requires batch > 1 |
+    | `_augment_motion_artifacts` | 0.5 | Patient movement, baseline wander — injects 1–3 localised bursts of low-frequency sinusoid + high-frequency noise |
+    | `_augment_channel_shift` | 0.6 | Electrode placement variance, inter-lead differences — applies an independent scale and DC offset to each lead |
+  </Tab>
+</Tabs>
+
+## Augmentation Method Reference
+
+<AccordionGroup>
+  <Accordion title="_weak_jitter(x, std=0.03)">
+    Adds zero-mean Gaussian noise scaled by `std` to the entire signal tensor. Applied with probability **0.9** on every call, making it the most consistently active augmentation.
+
+    **Simulates:** Thermal sensor noise, 50/60 Hz electrical interference, and quantisation noise in ADC circuits.
+
+    ```python
+    # Equivalent behaviour (internal)
+    noise = torch.randn_like(x) * 0.03
+    x = x + noise  # applied with prob 0.9
+    ```
+  </Accordion>
+
+  <Accordion title="_weak_scaling(x, scale_range=0.15)">
+    Multiplies the entire signal by a scalar drawn uniformly from `[1 - scale_range, 1 + scale_range]`, i.e. `[0.85, 1.15]` at the default setting. Applied with probability **0.8**.
+
+    **Simulates:** Gain drift between recording sessions, automatic gain control variation, and electrode impedance changes.
+  </Accordion>
+
+  <Accordion title="_augment_channel_noise(x)">
+    For each of the `channels` leads independently, samples a noise level in `[0.5%, 2%]` of that lead's empirical standard deviation and adds Gaussian noise at that level. Applied with probability **0.6** when `channels > 1`.
+
+    **Simulates:** The real-world situation where individual ECG leads have different signal-to-noise ratios depending on electrode contact quality and anatomical positioning.
+  </Accordion>
+
+  <Accordion title="_time_warp(x, num_points=3)">
+    Constructs a random non-linear time mapping using `num_points` intermediate control points with ±5% jitter, then resamples the signal through the resulting index mapping. Applied with probability **0.5**.
+
+    **Simulates:** Temporal distortions arising from heart rate variability, breathing-related signal elongation/compression, and slight recording speed errors.
+  </Accordion>
+
+  <Accordion title="_augment_time_shift(x, max_shift_ratio=0.1)">
+    Shifts the signal by a random integer number of samples in `[-max_shift × L, +max_shift × L]`. Zeros pad the vacated end. Applied with probability **0.7**.
+
+    **Simulates:** Variability in recording trigger timing, lead-on delays, and heart-rate-driven beat alignment differences between sessions.
+  </Accordion>
+
+  <Accordion title="_augment_dropout(x, dropout_ratio=0.1)">
+    Zeros out one or more contiguous temporal segments totalling approximately `dropout_ratio × L` samples, replacing masked values with the global signal mean. Unlike standard i.i.d. dropout, segments are spatially coherent. Applied with probability **0.5**.
+
+    **Simulates:** Signal interruptions from temporary electrode detachment, patient movement artefacts long enough to render a segment uninterpretable, and data transmission dropouts.
+  </Accordion>
+
+  <Accordion title="_augment_bandpass_variation(x)">
+    Applies a soft bandpass filter in the FFT domain with randomly sampled low-cut (0–5 Hz) and high-cut (50–250 Hz) corner frequencies. The transition bands use a linear ramp window. Applied with probability **0.5**.
+
+    **Simulates:** Device-specific analogue filter designs — clinical ECG devices nominally pass 0.5–100 Hz, but Holter monitors, consumer wearables, and research-grade devices differ significantly.
+  </Accordion>
+
+  <Accordion title="_augment_segment_cropping(x, crop_ratio_range=(0.1, 0.3))">
+    Removes a contiguous segment comprising 10–30% of the signal length and fills the gap with linear interpolation between the boundary samples. Applied with probability **0.5**.
+
+    **Simulates:** Missing data windows due to electrode contact loss, corrupt storage blocks, or deliberate cropping of artefact-heavy regions in preprocessing pipelines.
+  </Accordion>
+
+  <Accordion title="_augment_mixup(x, alpha=0.2)">
+    Samples a mixing coefficient `λ ~ Beta(alpha, alpha)` and returns `λ·x + (1−λ)·x_shuffled` where `x_shuffled` is a randomly permuted copy of the batch. **Requires `batch > 1`**; silently skips otherwise. Applied with probability **0.4**.
+
+    **Simulates:** Averaged multi-lead readings, physiologically plausible blends of two patients' signals in a shared recording environment, and label-space interpolation for multi-label classification.
+  </Accordion>
+
+  <Accordion title="_augment_cutmix(x, cutmix_prob=0.5)">
+    Replaces a random temporal segment (spanning 10–33% of signal length) with the matching segment from a randomly selected other sample in the batch. **Requires `batch > 1`**. Applied with probability equal to `cutmix_prob` (default **0.5**).
+
+    **Simulates:** Electrode cross-talk, stitched recordings from different sessions, and segment-level annotation noise.
+  </Accordion>
+
+  <Accordion title="_augment_motion_artifacts(x, artifact_duration_ratio=0.05)">
+    Injects 1–3 localised motion artefact bursts per sample. Each burst is a combination of a low-frequency sinusoid (0.5–2 Hz, amplitude 0.5–2.0) simulating baseline wander and a Gaussian noise burst (std 0.3) simulating high-frequency movement noise. Applied with probability **0.5**.
+
+    **Simulates:** Patient movement during recording, respiration-induced baseline wander, cable movement artefacts, and electrode pop.
+  </Accordion>
+
+  <Accordion title="_augment_channel_shift(x)">
+    Applies an independent scale (`1 ± 10%`) and DC offset (drawn from `N(0, 0.05)`) to each lead separately. Applied with probability **0.6** when `channels > 1`.
+
+    **Simulates:** Inter-lead amplitude variation from electrode placement differences, skin impedance heterogeneity, and device-specific per-channel gain calibration drift.
+  </Accordion>
+</AccordionGroup>
+
+## Output Clamping
+
+After both augmentation stages, all output values are hard-clamped to the range `[-10, 10]`:
+
+```python
+return torch.clamp(x, -10, 10)
+```
+
+This guard prevents numerically unstable representations from propagating into the encoder, particularly when mixing augmentations stack additive noise on top of amplitude-scaled signals.

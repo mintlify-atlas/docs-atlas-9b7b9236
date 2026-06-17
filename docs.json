@@ -1,72 +1,100 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "SSRL-ECG",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
-  },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "primary": "#2563EB",
+    "light": "#EFF6FF",
+    "dark": "#1E3A8A"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/Tumo505/SSL-for-ECG-classification"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/Tumo505/SSL-for-ECG-classification"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/self-supervised-learning",
+              "concepts/domain-adaptive-augmentations",
+              "concepts/datasets"
+            ]
+          },
+          {
+            "group": "Training",
+            "pages": [
+              "training/ssl-pretraining",
+              "training/fine-tuning",
+              "training/supervised-baseline",
+              "training/traditional-ml"
+            ]
+          },
+          {
+            "group": "Evaluation & Analysis",
+            "pages": [
+              "evaluation/metrics",
+              "evaluation/label-scarcity",
+              "evaluation/transfer-mitbih",
+              "evaluation/visualization"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/reproducibility",
+              "guides/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Models",
+            "pages": [
+              "api/models/ecg-encoder",
+              "api/models/simclr",
+              "api/models/byol",
+              "api/models/resnet1d",
+              "api/models/losses"
+            ]
+          },
+          {
+            "group": "Augmentations",
+            "pages": [
+              "api/augmentations/ecg-augmentations",
+              "api/augmentations/contrastive-pipeline"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/utils",
+              "api/visualization"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

@@ -1,0 +1,231 @@
+---
+title: "SimCLR: Contrastive Self-Supervised ECG Learning"
+sidebarTitle: "SimCLR"
+description: "SimCLR adaptation for ECG signals: projection head, NT-Xent contrastive loss, augmentation pipeline, and a full training step example."
+---
+
+SimCLR (Simple Framework for Contrastive Learning) is one of the two primary self-supervised pretraining objectives in SSRL-ECG. The framework learns representations by maximising agreement between two differently-augmented views of the same ECG recording while pushing apart representations from distinct recordings. All components are in `ssrl_ecg.models.simclr` and are designed to work directly with the `ECGEncoder1DCNN` backbone.
+
+---
+
+## SimCLRProjectionHead
+
+The projection head maps pooled encoder representations to a lower-dimensional space where the NT-Xent contrastive loss is applied. Following the SimCLR paper (Chen et al., ICML 2020), only the encoder representations (before this head) are used during downstream fine-tuning.
+
+The head is a two-layer MLP:
+
+```
+Linear(input_dim, hidden_dim)  →  ReLU  →  Linear(hidden_dim, output_dim)
+```
+
+### Constructor Parameters
+
+<ParamField path="input_dim" type="int" default="256">
+  Dimension of the encoder output after global average pooling. Must match
+  `encoder.out_channels` (256 at the default `width=64`).
+</ParamField>
+
+<ParamField path="hidden_dim" type="int" default="2048">
+  Width of the hidden layer in the projection MLP.
+</ParamField>
+
+<ParamField path="output_dim" type="int" default="128">
+  Dimension of the projected embedding where the contrastive loss is computed.
+</ParamField>
+
+### Forward
+
+```python
+def forward(x: Tensor) -> Tensor
+```
+
+<ParamField path="x" type="Tensor" required>
+  Pooled encoder features of shape `[batch, input_dim]`.
+</ParamField>
+
+<ResponseField name="z" type="Tensor">
+  Projected embeddings of shape `[batch, output_dim]`. These are passed directly
+  to `NTXentLoss`; normalize them before cosine-similarity computations.
+</ResponseField>
+
+---
+
+## SimCLRModel
+
+`SimCLRModel` is the top-level SSL model that combines an encoder backbone with a projection head. The forward pass returns both the pooled encoder representation `h` (used during fine-tuning) and the projected embedding `z` (used during pretraining).
+
+### Constructor Parameters
+
+<ParamField path="encoder" type="nn.Module" required>
+  The feature extraction backbone. Must expose an `out_channels` attribute (e.g.,
+  `ECGEncoder1DCNN`). The projection head input dimension is inferred automatically
+  from `encoder.out_channels`.
+</ParamField>
+
+<ParamField path="projection_dim" type="int" default="128">
+  Output dimension of the projection head, passed through to `SimCLRProjectionHead`.
+</ParamField>
+
+### Forward
+
+```python
+def forward(x: Tensor) -> Tuple[Tensor, Tensor]
+```
+
+<ParamField path="x" type="Tensor" required>
+  ECG tensor of shape `[batch, channels, length]`.
+</ParamField>
+
+<ResponseField name="h" type="Tensor">
+  Global-average-pooled encoder features of shape `[batch, encoder_dim]`.
+  Use these as representations during linear evaluation or fine-tuning.
+</ResponseField>
+
+<ResponseField name="z" type="Tensor">
+  Projected embeddings of shape `[batch, projection_dim]`.
+  These are used exclusively for computing the NT-Xent loss during pretraining
+  and are discarded afterwards.
+</ResponseField>
+
+---
+
+## NTXentLoss
+
+`NTXentLoss` implements the Normalized Temperature-scaled Cross Entropy loss used by SimCLR. For a batch of `N` samples, the 2N representations (N from each augmented view) are concatenated to form a similarity matrix. Each representation's positive pair is the other augmented view of the same recording; all other 2N−2 representations are treated as negatives.
+
+Both `z_i` and `z_j` are L2-normalised internally before computing cosine similarities.
+
+### Constructor Parameters
+
+<ParamField path="temperature" type="float" default="0.07">
+  Temperature τ that scales the logits before softmax. Lower temperatures sharpen
+  the distribution and make the task harder; values in `[0.05, 0.2]` are typical.
+</ParamField>
+
+<ParamField path="batch_size" type="int" default="256">
+  Expected batch size, used when constructing the positive-pair index labels.
+  If the actual batch size at runtime differs, the loss adapts automatically
+  because labels are computed from `z_i.shape[0]`.
+</ParamField>
+
+### Forward
+
+```python
+def forward(z_i: Tensor, z_j: Tensor) -> Tensor
+```
+
+<ParamField path="z_i" type="Tensor" required>
+  Projected embeddings from the first augmented view, shape `[batch, proj_dim]`.
+</ParamField>
+
+<ParamField path="z_j" type="Tensor" required>
+  Projected embeddings from the second augmented view, shape `[batch, proj_dim]`.
+  Must have the same shape as `z_i`.
+</ParamField>
+
+<ResponseField name="loss" type="Tensor">
+  Scalar cross-entropy loss averaged over all 2N samples. Minimising this loss
+  encourages `z_i[k]` and `z_j[k]` to be the most similar pair in the full 2N batch.
+</ResponseField>
+
+---
+
+## SimCLRAugmentations
+
+`SimCLRAugmentations` wraps the core `ECGAugmentations` pipeline to produce two independently-augmented views of each input batch. Under the hood it delegates to `ECGAugmentations(signal_length, prob_strong=prob)`, which applies a randomised combination of time-domain, frequency-domain, and noise augmentations.
+
+### Constructor Parameters
+
+<ParamField path="signal_length" type="int" default="5000">
+  Expected length of the input ECG time-series. Used to configure the internal
+  augmentation pipeline (e.g., crop windows, segment lengths).
+</ParamField>
+
+<ParamField path="prob" type="float" default="0.8">
+  Probability of applying each strong augmentation within a single view. Higher
+  values increase augmentation diversity and task difficulty.
+</ParamField>
+
+### `__call__`
+
+```python
+def __call__(x: Tensor) -> Tuple[Tensor, Tensor]
+```
+
+<ParamField path="x" type="Tensor" required>
+  Input ECG batch of shape `[batch, channels, length]`.
+</ParamField>
+
+<ResponseField name="(x1, x2)" type="Tuple[Tensor, Tensor]">
+  Two independently-augmented views of the input batch, each of the same shape
+  `[batch, channels, length]`.
+</ResponseField>
+
+---
+
+## Full SimCLR Training Step
+
+The following snippet shows a complete pretraining iteration that wires together all four components: the encoder, the SimCLR model, the NT-Xent loss, and the augmentation pipeline.
+
+```python
+import torch
+from ssrl_ecg.models.cnn import ECGEncoder1DCNN
+from ssrl_ecg.models.simclr import SimCLRModel, NTXentLoss, SimCLRAugmentations
+
+# ── Build components ──────────────────────────────────────────────────────────
+encoder   = ECGEncoder1DCNN(in_ch=12, width=64)
+model     = SimCLRModel(encoder=encoder, projection_dim=128)
+criterion = NTXentLoss(temperature=0.07, batch_size=256)
+aug       = SimCLRAugmentations(signal_length=1000, prob=0.8)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+# ── Single training step ──────────────────────────────────────────────────────
+x = torch.randn(256, 12, 1000).to(device)   # raw ECG batch
+
+# Produce two augmented views
+x1, x2 = aug(x)                             # each: [256, 12, 1000]
+
+# Forward through the online network
+h1, z1 = model(x1)                          # h1: [256, 256], z1: [256, 128]
+h2, z2 = model(x2)                          # h2: [256, 256], z2: [256, 128]
+
+# Contrastive loss on projections
+loss = criterion(z1, z2)                    # scalar
+
+optimizer.zero_grad()
+loss.backward()
+optimizer.step()
+
+print(f"Loss: {loss.item():.4f}")
+
+# ── Save encoder for downstream fine-tuning ───────────────────────────────────
+torch.save({"encoder": model.encoder.state_dict()}, "checkpoints/ssl_simclr.pt")
+```
+
+<Note>
+  During downstream fine-tuning, load the encoder weights from the checkpoint and
+  attach `ECGClassifier(encoder, n_classes=5)`. The projection head is discarded —
+  representations `h` from the encoder are far more transferable than `z`.
+</Note>
+
+---
+
+## Configuring Temperature
+
+The temperature hyperparameter has a strong effect on downstream performance. Low temperatures (e.g., `0.05`) create harder negatives and often yield better representations for fine-grained tasks, but can cause training instability with small batch sizes. A practical starting range is shown below:
+
+| Batch size | Recommended temperature |
+|------------|------------------------|
+| 64         | 0.10 – 0.20            |
+| 128        | 0.07 – 0.15            |
+| 256        | 0.05 – 0.10            |
+| 512+       | 0.05 – 0.07            |
+
+<Tip>
+  SimCLR benefits significantly from large batch sizes because more negatives are
+  available within each batch. If GPU memory is limited, consider gradient
+  accumulation to simulate larger effective batches.
+</Tip>

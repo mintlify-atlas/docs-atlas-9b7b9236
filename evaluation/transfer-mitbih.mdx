@@ -1,0 +1,158 @@
+---
+title: "Transfer Evaluation on MIT-BIH Arrhythmia Dataset"
+sidebarTitle: "MIT-BIH Transfer"
+description: "Evaluate SSRL-ECG's PTB-XL pretrained encoder on the MIT-BIH arrhythmia dataset to measure cross-dataset representation quality."
+---
+
+Training a self-supervised encoder on PTB-XL teaches it to capture the temporal structure of 12-lead ECG signals. But how well do those learned representations generalise beyond PTB-XL? Transfer evaluation on the MIT-BIH arrhythmia dataset answers this question by applying the pretrained encoder — without retraining on PTB-XL labels — to an entirely different ECG corpus with its own patient population, acquisition hardware, and annotation scheme.
+
+## Why Transfer to MIT-BIH?
+
+Strong cross-dataset transfer is one of the most compelling arguments for self-supervised pretraining. A supervised model trained on PTB-XL diagnostic classes may overfit to PTB-XL-specific signal characteristics. An SSL encoder that generalises to MIT-BIH arrhythmia detection demonstrates that it has learned genuinely physiological ECG structure rather than dataset-specific artefacts.
+
+## About the MIT-BIH Arrhythmia Dataset
+
+MIT-BIH is a widely-used benchmark released by PhysioNet (MIT-BIH Arrhythmia Database v1.0.0). Key characteristics:
+
+- **48 half-hour ambulatory ECG recordings** from 47 subjects at Boston's Beth Israel Hospital
+- **2-lead recordings** (MLII and one of V1, V2, V4, or V5) sampled at 360 Hz
+- **Arrhythmia annotations** at each beat, covering normal sinus rhythm and multiple abnormal rhythms
+- **Different distribution** from PTB-XL: shorter records, different leads, beat-level rather than record-level labels, and a distinct patient population
+
+For transfer evaluation in SSRL-ECG, the task is framed as **binary arrhythmia detection** (normal vs abnormal beat/segment), which maps naturally onto the single-output `ECGClassifier(n_classes=1)` used by `transfer_mitbih.py`.
+
+<Note>
+  MIT-BIH requires its own data folder setup. Download the dataset from PhysioNet and place the `.hea`, `.dat`, and `.atr` files under `data/MIT-BIH/files/mitdb/1.0.0/`. The `MITBIHDataset` loader expects this exact path structure.
+</Note>
+
+## Expected Folder Structure
+
+```
+data/
+  MIT-BIH/
+    files/
+      mitdb/
+        1.0.0/
+          100.hea
+          100.dat
+          100.atr
+          101.hea
+          ...
+```
+
+## Running the Transfer Evaluation
+
+<Steps>
+  <Step title="Prepare a pretrained checkpoint">
+    Use either a raw SSL checkpoint (with an `encoder` key) or a fine-tuned checkpoint (with a `model` key containing `encoder.*` weights).
+
+    ```bash
+    # SSL checkpoint from SimCLR pretraining
+    python -m ssrl_ecg.train_ssl_simclr \
+      --data-root data/PTB-XL \
+      --epochs 20 \
+      --out checkpoints/ssl_simclr_enhanced.pt
+    ```
+  </Step>
+
+  <Step title="Run the transfer evaluation script">
+    Point the script at the MIT-BIH data folder and your checkpoint.
+
+    ```bash
+    python -m ssrl_ecg.transfer_mitbih \
+      --mitbih-root data/MIT-BIH \
+      --checkpoint checkpoints/ssl_simclr_enhanced.pt
+    ```
+
+    For a fine-tuned checkpoint (with a `model` key), the script automatically extracts the encoder weights from the `encoder.*` sub-keys.
+  </Step>
+
+  <Step title="Interpret the output">
+    The script prints AUROC and F1 for binary arrhythmia detection:
+
+    ```json
+    {"transfer_eval": {"auroc": 0.8241, "f1": 0.7103}}
+    ```
+  </Step>
+</Steps>
+
+## CLI Arguments
+
+<ParamField path="--mitbih-root" type="Path" required>
+  Root directory containing the MIT-BIH data files. Must have the `files/mitdb/1.0.0/` subdirectory with `.hea`, `.dat`, and `.atr` files.
+</ParamField>
+
+<ParamField path="--checkpoint" type="Path" required>
+  Path to a pretrained or fine-tuned checkpoint. Accepted formats:
+  - `{"encoder": <state_dict>}` — raw SSL checkpoint
+  - `{"model": {"encoder.*": ..., "classifier.*": ...}}` — fine-tuned ECGClassifier checkpoint
+</ParamField>
+
+<ParamField path="--batch-size" type="int" default="32">
+  Inference batch size. MIT-BIH records are shorter than PTB-XL, so 32 is typically sufficient.
+</ParamField>
+
+<ParamField path="--finetune-epochs" type="int" default="10">
+  Number of epochs for fine-tuning the classification head on MIT-BIH. The encoder remains frozen during this step unless `--freeze-encoder` is omitted.
+</ParamField>
+
+<ParamField path="--lr" type="float" default="1e-3">
+  Learning rate for the classification head optimiser (Adam).
+</ParamField>
+
+<ParamField path="--freeze-encoder" type="flag">
+  When set, only the classification head is updated during fine-tuning. When absent, the full model is fine-tuned.
+</ParamField>
+
+<ParamField path="--use-ssl" type="flag">
+  Indicates that the checkpoint is a raw SSL encoder (with an `encoder` key) rather than a full fine-tuned classifier.
+</ParamField>
+
+<ParamField path="--seed" type="int" default="42">
+  Random seed passed to `set_seed` for reproducible weight initialisation and data shuffling.
+</ParamField>
+
+## How the Encoder Is Adapted
+
+MIT-BIH provides 2-lead recordings, but the PTB-XL-pretrained encoder expects 12-channel input (`ECGEncoder1DCNN(in_ch=12, ...)`). The `MITBIHDataset` loader handles this by **replicating the 2-lead signal across all 12 channels**, preserving the encoder's input dimensionality without re-architecture. The classification head is then trained from scratch for the binary arrhythmia task.
+
+```python
+# transfer_mitbih.py — encoder loading (simplified)
+encoder = ECGEncoder1DCNN(in_ch=12, width=64)
+ckpt = torch.load(args.checkpoint, map_location="cpu")
+
+if "encoder" in ckpt:
+    encoder.load_state_dict(ckpt["encoder"])
+elif "model" in ckpt:
+    encoder_state = {
+        k.replace("encoder.", ""): v
+        for k, v in ckpt["model"].items()
+        if k.startswith("encoder.")
+    }
+    encoder.load_state_dict(encoder_state)
+
+model = ECGClassifier(encoder=encoder, n_classes=1).to(device)
+```
+
+## What Transfer Success Tells Us
+
+A high transfer AUROC (above 0.80) on MIT-BIH after minimal fine-tuning indicates that the SSL encoder has captured generalisable physiological ECG representations — not just the label distribution of PTB-XL. Specifically, it shows:
+
+<CardGroup cols="2">
+  <Card title="Morphological generalisation" icon="wave-square">
+    The encoder responds to waveform shape (P-wave, QRS complex, T-wave) regardless of the acquisition system or lead configuration.
+  </Card>
+  <Card title="Temporal structure capture" icon="clock">
+    Self-supervised pretraining on PTB-XL's 10-second windows has encoded rhythm information that transfers to MIT-BIH's ambulatory segments.
+  </Card>
+  <Card title="Domain shift robustness" icon="shield">
+    Different patient demographics, recording hardware, and annotation protocols do not prevent the encoder from providing a useful feature basis.
+  </Card>
+  <Card title="Low-data adaptability" icon="database">
+    The binary head achieves competitive performance with only 10 fine-tuning epochs, confirming that the encoder's features are linearly separable for new tasks.
+  </Card>
+</CardGroup>
+
+<Warning>
+  If the transfer AUROC falls below 0.70, verify that the MIT-BIH data is correctly preprocessed to 1,000 time-steps (the `signal_length` default) and that the checkpoint was actually trained on PTB-XL with the standard encoder architecture (`ECGEncoder1DCNN(in_ch=12, width=64)`).
+</Warning>

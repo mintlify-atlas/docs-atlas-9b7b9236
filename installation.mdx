@@ -1,0 +1,175 @@
+---
+title: "Install SSRL-ECG and configure your environment"
+sidebarTitle: "Installation"
+description: "Set up SSRL-ECG with Python 3.9+, PyTorch 2.2+, and all required dependencies using pip editable install in a virtual environment."
+---
+
+SSRL-ECG is distributed as a standard Python package with a `pyproject.toml`-based build. The recommended path is to create an isolated virtual environment, clone the repository, and install in editable mode so that every module under `src/ssrl_ecg/` is immediately importable without re-installing after code changes.
+
+## Prerequisites
+
+Before you begin, ensure your system has:
+
+- **Python 3.9 or higher** — required by `pyproject.toml`
+- **Git** — to clone the repository
+- **pip 21+** — ships with Python 3.9; upgrade with `pip install --upgrade pip` if needed
+- **CUDA toolkit** *(optional)* — for GPU-accelerated training; SSRL-ECG auto-detects the device via `choose_device()`
+
+## Step-by-Step Installation
+
+<Steps>
+
+  <Step title="Clone the repository">
+    Download the source code to your local machine.
+
+    <Tabs>
+      <Tab title="Linux / macOS">
+        ```bash
+        git clone https://github.com/Tumo505/SSL-for-ECG-classification.git
+        cd SSL-for-ECG-classification
+        ```
+      </Tab>
+      <Tab title="Windows PowerShell">
+        ```powershell
+        git clone https://github.com/Tumo505/SSL-for-ECG-classification.git
+        cd SSL-for-ECG-classification
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Create and activate a virtual environment">
+    Isolate SSRL-ECG's dependencies from your system Python installation.
+
+    <Tabs>
+      <Tab title="Linux / macOS">
+        ```bash
+        python -m venv .venv
+        source .venv/bin/activate
+        ```
+      </Tab>
+      <Tab title="Windows PowerShell">
+        ```powershell
+        python -m venv .venv
+        .\.venv\Scripts\Activate.ps1
+        ```
+      </Tab>
+    </Tabs>
+
+    After activation your shell prompt will be prefixed with `(.venv)`.
+  </Step>
+
+  <Step title="Install the package in editable mode">
+    Run the editable install from the repository root. This resolves all declared dependencies automatically.
+
+    ```bash
+    pip install -e .
+    ```
+
+    <Note>
+      The `-e` (editable) flag installs the package by symlinking `src/ssrl_ecg/` into your Python environment rather than copying files. This means any change you make to the source is reflected immediately — no reinstall step required. Without `-e`, Python will not be able to resolve `import ssrl_ecg` when running training scripts as `python -m ssrl_ecg.*`.
+    </Note>
+  </Step>
+
+  <Step title="Verify the installation">
+    Confirm the package is importable and all core dependencies are satisfied.
+
+    ```bash
+    python -c "import ssrl_ecg; print('OK')"
+    ```
+
+    Expected output:
+
+    ```
+    OK
+    ```
+
+    If you see `ModuleNotFoundError: No module named 'ssrl_ecg'`, ensure you ran `pip install -e .` from inside the repository root with your virtual environment active.
+  </Step>
+
+</Steps>
+
+## Installed Dependencies
+
+The editable install pulls in all packages declared in `pyproject.toml`. No separate `pip install -r requirements.txt` step is needed.
+
+| Package | Minimum Version | Purpose |
+|---|---|---|
+| `torch` | 2.2 | Neural network training and GPU acceleration |
+| `numpy` | 1.24 | Numerical array operations |
+| `pandas` | 2.0 | Metadata loading and DataFrame processing |
+| `scikit-learn` | 1.3 | Metrics, stratified sampling, label encoding |
+| `wfdb` | 4.1 | Reading PTB-XL and MIT-BIH WFDB-format signal files |
+| `tqdm` | 4.66 | Progress bars for training loops |
+| `pyyaml` | 6.0 | Configuration file parsing |
+| `scipy` | 1.10 | Signal processing (bandpass filtering, resampling) |
+| `matplotlib` | 3.5 | Plotting and figure generation |
+| `seaborn` | 0.12 | Publication-ready statistical visualizations |
+| `xgboost` | 2.0 | Gradient boosting baseline models |
+| `lightgbm` | 4.0 | Gradient boosting baseline models |
+
+<Tip>
+  Optional extras are declared in `pyproject.toml`. Install the development extras (Black formatter + pytest) with `pip install -e ".[dev]"`, or the full analysis stack with `pip install -e ".[ml,analysis]"`.
+</Tip>
+
+## Dataset Setup
+
+SSRL-ECG expects datasets to be present under a `data/` directory relative to wherever you run training commands. Create this structure before launching any training script.
+
+### Expected Folder Structure
+
+```
+data/
+├── PTB-XL/                        # Primary dataset (required)
+│   ├── ptbxl_database.csv         # Patient metadata and fold assignments
+│   ├── scp_statements.csv         # Diagnostic label definitions
+│   ├── records100/                # 100 Hz downsampled recordings
+│   │   ├── 00000/
+│   │   │   ├── *.hea
+│   │   │   └── *.dat
+│   │   └── ...
+│   └── records500/                # 500 Hz full-resolution recordings
+│       └── ...
+└── MIT-BIH/                       # Secondary dataset (optional)
+    └── files/
+        └── mitdb/
+            └── 1.0.0/
+                ├── *.hea
+                ├── *.dat
+                └── *.atr
+```
+
+PTB-XL is freely available from [PhysioNet](https://physionet.org/content/ptb-xl/1.0.3/). Download and extract the archive so that `ptbxl_database.csv` sits directly inside `data/PTB-XL/`.
+
+<Warning>
+  The `--data-root` argument in every training and evaluation script defaults to `data/PTB-XL`. If you store PTB-XL elsewhere, pass the correct path explicitly, for example `--data-root /mnt/datasets/PTB-XL`.
+</Warning>
+
+## GPU Setup
+
+SSRL-ECG selects the compute device automatically via the `choose_device()` utility — no manual device configuration is required. The priority order is:
+
+1. **CUDA** — used if `torch.cuda.is_available()` returns `True`
+2. **MPS** — used on Apple Silicon Macs if CUDA is unavailable
+3. **CPU** — fallback for all other environments
+
+Verify your GPU is visible to PyTorch:
+
+<Tabs>
+  <Tab title="Linux / macOS">
+    ```bash
+    python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+    nvidia-smi
+    ```
+  </Tab>
+  <Tab title="Windows PowerShell">
+    ```powershell
+    python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+    nvidia-smi
+    ```
+  </Tab>
+</Tabs>
+
+<Info>
+  If CUDA is unavailable, training will run on CPU. SimCLR pretraining for 20 epochs on PTB-XL is feasible on a modern multi-core CPU, but will be significantly slower than on a GPU. Consider reducing `--batch-size` to 64 if you encounter memory pressure on smaller GPUs.
+</Info>

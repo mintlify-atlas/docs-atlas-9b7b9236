@@ -1,0 +1,288 @@
+---
+title: "SSRL-ECG Utility Functions: Seeding, Device, Metrics"
+sidebarTitle: "Utilities"
+description: "Reference for all four SSRL-ECG utility functions: set_seed, choose_device, multilabel_metrics, and apply_random_mask with full parameter and return documentation."
+---
+
+The `ssrl_ecg.utils` module provides four stateless helper functions that cover the most common infrastructure concerns in an ECG self-supervised learning experiment: reproducibility seeding, device selection, multi-label evaluation metrics, and masked-reconstruction data preparation. All four are imported directly from the top-level package path.
+
+```python
+from ssrl_ecg.utils import (
+    set_seed,
+    choose_device,
+    multilabel_metrics,
+    apply_random_mask,
+)
+```
+
+<Tip>
+  Call `set_seed` as the very first statement in every experiment script — before importing dataset classes, initialising models, or calling `choose_device`. Any operation that touches a random number generator (NumPy, PyTorch, Python's `random`) before `set_seed` is called will produce non-reproducible results, even if you call it immediately afterwards.
+</Tip>
+
+---
+
+## `set_seed`
+
+```python
+set_seed(seed: int) -> None
+```
+
+Sets the global random state of Python's `random` module, NumPy, and PyTorch (both CPU and all CUDA devices) to a fixed `seed`. This is the minimal reproducibility contract required before any experiment.
+
+<ParamField path="seed" type="int" required>
+  Integer seed value. Common choices are `42`, `0`, or `2024`. The same value must be used across all runs you wish to compare.
+</ParamField>
+
+The function calls, in order:
+
+| RNG | Call |
+|---|---|
+| Python stdlib | `random.seed(seed)` |
+| NumPy | `np.random.seed(seed)` |
+| PyTorch CPU | `torch.manual_seed(seed)` |
+| PyTorch all GPUs | `torch.cuda.manual_seed_all(seed)` |
+
+**Returns** `None`.
+
+### Example
+
+```python
+from ssrl_ecg.utils import set_seed
+
+set_seed(42)
+
+# All downstream random operations are now deterministic
+import torch
+x = torch.randn(3, 5000)
+print(x[0, :3])  # same values on every run
+```
+
+<Warning>
+  `set_seed` does **not** set `torch.backends.cudnn.deterministic = True`. CUDA convolution algorithms may still introduce non-determinism when `cudnn.benchmark = True` (which `choose_device` enables). For fully reproducible GPU runs, also set `torch.backends.cudnn.deterministic = True` and accept the associated performance penalty.
+</Warning>
+
+---
+
+## `choose_device`
+
+```python
+choose_device() -> torch.device
+```
+
+Detects whether a CUDA-capable GPU is available and returns the appropriate `torch.device`. When a GPU is found, it also warms up the device, prints hardware diagnostics, and enables the cuDNN auto-tuner for optimal convolutional performance.
+
+**Returns**
+
+<ResponseField name="device" type="torch.device">
+  `torch.device("cuda:0")` if a CUDA-capable GPU is detected; `torch.device("cpu")` otherwise.
+</ResponseField>
+
+### GPU configuration performed
+
+When a GPU is available, `choose_device` performs the following side effects before returning:
+
+| Action | Effect |
+|---|---|
+| `torch.cuda.set_per_process_memory_fraction(0.95)` | Reserves 95% of GPU VRAM for the current process |
+| `torch.cuda.empty_cache()` | Clears the CUDA allocator cache before training begins |
+| `torch.backends.cudnn.benchmark = True` | Enables cuDNN algorithm auto-selection (faster for fixed input sizes) |
+| `torch.backends.cudnn.deterministic = False` | Trades strict reproducibility for runtime speed |
+
+### Console output (GPU present)
+
+```
+[GPU CONFIGURATION]
+  Device: NVIDIA GeForce RTX 4090
+  GPU Memory: 24.0 GB
+  CUDA Version: 12.1
+  cuDNN Version: 8902
+  PyTorch Version: 2.2.0
+  [STATUS] Using GPU mode - optimal for RTX 5070 Ti
+```
+
+### Example
+
+```python
+from ssrl_ecg.utils import set_seed, choose_device
+import torch
+
+set_seed(42)
+device = choose_device()
+
+model = MyEncoder().to(device)
+x = torch.randn(32, 12, 5000, device=device)
+z = model(x)
+```
+
+<Info>
+  `choose_device` always returns `cuda:0` (the first GPU). For multi-GPU training with `DistributedDataParallel`, call `torch.device(f"cuda:{local_rank}")` directly instead of using this helper.
+</Info>
+
+---
+
+## `multilabel_metrics`
+
+```python
+multilabel_metrics(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    threshold: float = 0.5,
+) -> Dict[str, float]
+```
+
+Computes the four evaluation metrics used in the SSRL-ECG benchmark for multi-label cardiovascular disease classification. All metrics are computed in a single pass and returned as a flat dictionary.
+
+<ParamField path="y_true" type="np.ndarray" required>
+  Ground-truth binary label matrix of shape `[n_samples, n_classes]`. Each entry must be `0` or `1`.
+</ParamField>
+
+<ParamField path="y_prob" type="np.ndarray" required>
+  Predicted probability matrix of shape `[n_samples, n_classes]`. Each entry should be a continuous value in `[0, 1]` (e.g. sigmoid outputs).
+</ParamField>
+
+<ParamField path="threshold" type="float" default="0.5">
+  Decision threshold applied to `y_prob` to produce binary predictions for F1, sensitivity, and specificity. AUROC is threshold-independent and always uses the raw probabilities.
+</ParamField>
+
+**Returns**
+
+<ResponseField name="metrics" type="Dict[str, float]">
+  Dictionary with four keys:
+
+  | Key | Description |
+  |---|---|
+  | `f1_macro` | Macro-averaged F1 score across all classes (`sklearn.metrics.f1_score` with `average="macro"`) |
+  | `auroc_macro` | Macro-averaged area under the ROC curve; classes with only one unique label value in `y_true` are silently skipped. Returns `NaN` if no class has both labels present. |
+  | `sensitivity_micro` | Micro-level sensitivity (recall): `TP / (TP + FN)` summed across all class-sample pairs, with a small `1e-8` epsilon to prevent division by zero |
+  | `specificity_micro` | Micro-level specificity: `TN / (TN + FP)` summed across all class-sample pairs |
+</ResponseField>
+
+### Class-skipping behaviour
+
+`auroc_macro` silently skips any class `c` where `len(np.unique(y_true[:, c])) < 2`. This handles the common scenario in cardiovascular datasets where a rare condition has no positive examples in the evaluation split. The mean is taken over the remaining classes.
+
+### Example
+
+```python
+import numpy as np
+from ssrl_ecg.utils import multilabel_metrics
+
+# Simulated predictions for 200 patients, 5 conditions
+y_true = np.random.randint(0, 2, size=(200, 5))
+y_prob = np.random.rand(200, 5)
+
+metrics = multilabel_metrics(y_true, y_prob, threshold=0.5)
+print(metrics)
+```
+
+```python
+{
+    'f1_macro':           0.6448,
+    'auroc_macro':        0.8717,
+    'sensitivity_micro':  0.6831,
+    'specificity_micro':  0.9411,
+}
+```
+
+### Integration with a training loop
+
+```python
+from ssrl_ecg.utils import multilabel_metrics
+import numpy as np
+
+all_probs, all_labels = [], []
+
+model.eval()
+with torch.no_grad():
+    for x, y in val_loader:
+        logits = model(x.to(device))
+        probs  = torch.sigmoid(logits).cpu().numpy()
+        all_probs.append(probs)
+        all_labels.append(y.numpy())
+
+y_prob = np.concatenate(all_probs,  axis=0)   # [N, n_classes]
+y_true = np.concatenate(all_labels, axis=0)   # [N, n_classes]
+
+metrics = multilabel_metrics(y_true, y_prob, threshold=0.5)
+print(f"Val AUROC: {metrics['auroc_macro']:.4f}  |  F1: {metrics['f1_macro']:.4f}")
+```
+
+---
+
+## `apply_random_mask`
+
+```python
+apply_random_mask(
+    x: torch.Tensor,
+    mask_ratio: float,
+    block_size: int = 50,
+) -> torch.Tensor
+```
+
+Masks contiguous temporal blocks in each sample of a mini-batch by setting them to zero. The number of blocks per sample is derived from `mask_ratio` and `block_size`, and each block's start position is sampled uniformly at random. Used to prepare inputs for masked auto-encoder (MAE) style reconstruction pretraining.
+
+<ParamField path="x" type="torch.Tensor" required>
+  Input tensor of shape `[batch, channels, time]`. A clone is made internally; the original tensor is not modified.
+</ParamField>
+
+<ParamField path="mask_ratio" type="float" required>
+  Fraction of the total signal length to mask, in `[0, 1]`. A value of `0.15` masks approximately 15% of each sample. Passing `0` or a negative value returns `x` unchanged.
+</ParamField>
+
+<ParamField path="block_size" type="int" default="50">
+  Length of each contiguous masked block in time-steps. At 500 Hz this corresponds to 100 ms per block. Larger `block_size` values create fewer but longer gaps, which increase reconstruction difficulty and are generally better for pretraining. The number of masked blocks per sample is `max(1, floor(T × mask_ratio / block_size))`.
+</ParamField>
+
+**Returns**
+
+<ResponseField name="x_masked" type="torch.Tensor">
+  Masked copy of the input tensor with the same shape `[batch, channels, time]`. Masked positions are set to `0.0` across all channels simultaneously, preserving inter-lead alignment within each masked window.
+</ResponseField>
+
+### Understanding `block_size`
+
+<Info>
+  The `block_size` parameter controls the trade-off between mask granularity and reconstruction difficulty:
+
+  - **Small `block_size`** (e.g. `10`): Many short gaps. The encoder can often interpolate across them using local context — easier pretraining task, weaker representations.
+  - **Large `block_size`** (e.g. `100–200`): Fewer, longer gaps. The encoder must learn longer-range temporal dependencies to reconstruct them — harder task, typically stronger representations.
+  - **Default `50`** (100 ms at 500 Hz): Covers roughly one cardiac half-cycle, making it difficult to reconstruct without learning global cardiac rhythm structure.
+</Info>
+
+### Example
+
+```python
+import torch
+from ssrl_ecg.utils import apply_random_mask
+
+x = torch.randn(32, 12, 5000)           # [batch, channels, time]
+
+# Mask 15% of each signal in 50-sample blocks
+x_masked = apply_random_mask(x, mask_ratio=0.15, block_size=50)
+
+print(x_masked.shape)                   # torch.Size([32, 12, 5000])
+
+# Count zero-valued time steps (approximate, since x may have near-zero values by chance)
+n_zero = (x_masked == 0.0).all(dim=1).sum().item()
+print(f"Masked time steps (approx): {n_zero}")
+```
+
+### Use in masked reconstruction pretraining
+
+```python
+from ssrl_ecg.utils import apply_random_mask
+
+for x, _ in pretrain_loader:
+    x = x.to(device)                           # [B, 12, 5000]
+    x_masked = apply_random_mask(
+        x,
+        mask_ratio=0.15,
+        block_size=50,
+    )
+
+    x_reconstructed = model(x_masked)          # predict the full signal
+    loss = F.mse_loss(x_reconstructed, x)      # reconstruct original from masked input
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+```

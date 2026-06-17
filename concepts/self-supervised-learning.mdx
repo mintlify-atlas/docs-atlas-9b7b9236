@@ -1,0 +1,193 @@
+---
+title: "Self-Supervised Learning for ECG Classification"
+sidebarTitle: "Self-Supervised Learning"
+description: "How SSRL-ECG uses contrastive and momentum-based pretraining to learn rich cardiac representations from unlabeled ECG data before fine-tuning on just 10% labels."
+---
+
+Self-supervised learning (SSL) offers a powerful solution to the chronic label scarcity in clinical cardiology. Rather than relying on expensive expert annotations for every waveform, SSL first teaches a neural network to recognize structural similarities between different augmented views of the same ECG recording. The resulting encoder captures rhythm, morphology, and inter-lead relationships that transfer directly to downstream disease classification — no labels needed during pretraining.
+
+## The Two-View Contrastive Framework
+
+The core idea is elegantly simple: for every ECG sample in a training batch, apply two independent stochastic augmentation pipelines to produce two "views" — perturbed versions that look different on the surface but must share the same underlying cardiac identity. The encoder is then trained so that embeddings of the same sample's two views are pulled together in representation space, while embeddings of different samples are pushed apart.
+
+```text
+Raw ECG ──┬──► Augmentation A ──► Encoder ──► Projection Head ──► z₁ ─┐
+          │                                                              ├──► Contrastive Loss
+          └──► Augmentation B ──► Encoder ──► Projection Head ──► z₂ ─┘
+```
+
+`ECGAugmentations.__call__()` encapsulates exactly this step. It accepts a tensor of shape `[batch, channels, time]` and returns two independently augmented copies `(x1, x2)` ready for the SSL objective.
+
+### Creating Two Views with `SimCLRAugmentations`
+
+```python
+import torch
+from ssrl_ecg.models.simclr import SimCLRAugmentations
+
+# 500 Hz, 10-second 12-lead ECG batch
+x = torch.randn(128, 12, 5000)   # [batch, leads, time]
+
+aug = SimCLRAugmentations(signal_length=5000, prob=0.8)
+x1, x2 = aug(x)                  # two independent views
+
+print(x1.shape)   # torch.Size([128, 12, 5000])
+print(x2.shape)   # torch.Size([128, 12, 5000])
+print(torch.allclose(x1, x2))    # False — views differ
+```
+
+`SimCLRAugmentations` is a thin wrapper around `ECGAugmentations` that forwards both calls through the same domain-adaptive pipeline. The `prob=0.8` parameter controls how often the heavier strong-augmentation branch fires (see [Domain-Adaptive Augmentations](/concepts/domain-adaptive-augmentations) for the full breakdown).
+
+---
+
+## SimCLR: Contrastive Learning Without Labels
+
+SimCLR (Chen et al., ICML 2020) is the recommended SSL framework in SSRL-ECG, achieving **AUROC 0.8717** on PTB-XL after fine-tuning on just 10% of labeled data.
+
+### Architecture
+
+The `SimCLRModel` wraps any encoder backbone (default: `ECGEncoder1DCNN` with 256-dim output) with a two-layer `SimCLRProjectionHead`:
+
+```text
+ECGEncoder1DCNN  →  GlobalAvgPool  →  h ∈ ℝ²⁵⁶   (representation, used at fine-tune time)
+                                    ↓
+                        Linear(256 → 2048) → ReLU → Linear(2048 → 128)
+                                    ↓
+                                z ∈ ℝ¹²⁸           (projection, used only during pretraining)
+```
+
+The encoder produces a 256-dimensional feature vector `h` after global average pooling. The projection head maps this to a 128-dimensional unit sphere vector `z`, which is used exclusively during the contrastive pretraining phase and discarded at fine-tuning time.
+
+### NT-Xent Loss
+
+The **Normalized Temperature-scaled Cross Entropy (NT-Xent)** loss treats the two augmented views of the same sample as a positive pair, and all other `2(N−1)` samples in the batch as negatives:
+
+1. Normalize both projection vectors: `z̃ = z / ‖z‖₂`
+2. Build a `2N × 2N` cosine similarity matrix across the concatenated batch
+3. Scale by temperature τ = 0.07 (a low τ sharpens the distribution, enforcing tight clusters)
+4. Apply cross-entropy: the "correct class" for each view is its paired counterpart
+
+A low temperature value (0.07) forces the model to distinguish even subtly different representations, which encourages learning fine-grained cardiac features rather than coarse anatomy.
+
+```python
+from ssrl_ecg.models.simclr import NTXentLoss
+
+criterion = NTXentLoss(temperature=0.07, batch_size=128)
+loss = criterion(z1, z2)   # z1, z2: [N, 128] projection vectors
+```
+
+<Note>
+The projection head output `z` (dim=128) is used only for the NT-Xent loss during pretraining. Downstream classification always uses the encoder representation `h` (dim=256), which retains richer structural information.
+</Note>
+
+---
+
+## BYOL: Momentum-Based Learning Without Negatives
+
+BYOL (Bootstrap Your Own Latent, Grill et al., NeurIPS 2020) eliminates the need for negative pairs entirely, instead training an **online network** to predict the representations produced by a slowly-updating **target network**.
+
+### Online vs. Target Network
+
+<CardGroup cols={2}>
+  <Card title="Online Network" icon="bolt">
+    **Parameters updated** by gradient descent every step.
+    Consists of: `encoder` → `online_projector` → `online_predictor`.
+    The predictor is the key asymmetry — it only exists in the online branch.
+  </Card>
+  <Card title="Target Network" icon="crosshairs">
+    **Parameters never directly trained** — updated only via exponential moving average (EMA) of the online encoder and projector weights.
+    No predictor head. Produces stable regression targets.
+  </Card>
+</CardGroup>
+
+### Momentum Update
+
+After each gradient step, the target network weights are updated with EMA:
+
+```python
+# From BYOLModel.update_target_network()
+target_param.data = tau * target_param.data + (1 - tau) * online_param.data
+```
+
+With `momentum-tau = 0.99`, the target network changes very slowly — a slow-moving teacher prevents representational collapse without any explicit negative pairs.
+
+### BYOL Loss
+
+The loss minimizes the normalized L2 distance between the online predictor's output and the target projector's output (both computed on opposite views):
+
+```text
+L_BYOL = 2 − 2 · (pred₁ · target₂) / (‖pred₁‖ · ‖target₂‖)
+        + 2 − 2 · (pred₂ · target₁) / (‖pred₂‖ · ‖target₁‖)
+```
+
+The symmetric formulation ensures both views contribute equally to the gradient signal.
+
+---
+
+## SimCLR vs. BYOL: Side-by-Side Comparison
+
+| Property | SimCLR | BYOL |
+|---|---|---|
+| **Algorithm** | Contrastive (NT-Xent) | Momentum / Bootstrapping |
+| **Loss type** | NT-Xent (cross-entropy over similarities) | Normalized regression (L2) |
+| **Negative pairs required** | Yes — all other batch samples | No — target network prevents collapse |
+| **Temperature parameter** | τ = 0.07 | — |
+| **Momentum parameter** | — | τ = 0.99 |
+| **Projection dim** | 128 | 256 |
+| **Recommended batch size** | 128 | 256 |
+| **PTB-XL AUROC (10% labels)** | **0.8717** | 0.8565 |
+| **PTB-XL F1 (10% labels)** | **0.6448** | 0.6301 |
+
+<Tip>
+SimCLR outperforms BYOL by **0.0152 AUROC** on PTB-XL with the same augmentation pipeline. SimCLR is the recommended choice for new experiments. Use BYOL when very large batch sizes are impractical and you want to avoid the sensitivity to batch composition that contrastive losses introduce.
+</Tip>
+
+---
+
+## Fine-Tuning Protocol: Label-Efficient Classification
+
+After pretraining, SSRL-ECG adopts a **linear probing** protocol to measure the quality of the learned representations in a label-efficient setting.
+
+<Steps>
+  <Step title="Pretrain the encoder (SSL phase)">
+    Run SimCLR or BYOL pretraining on the full unlabeled PTB-XL training set (folds 1–8, 17,489 samples). Only the augmented views and the SSL objective are used — no class labels are seen.
+
+    ```bash
+    python -m ssrl_ecg.train_ssl_simclr \
+      --data-root data/PTB-XL \
+      --epochs 20 \
+      --batch-size 128 \
+      --temperature 0.07 \
+      --seed 42 \
+      --out checkpoints/ssl_simclr_enhanced.pt
+    ```
+  </Step>
+
+  <Step title="Freeze the encoder weights">
+    Load the pretrained encoder checkpoint. All encoder parameters are frozen — gradients do not flow back into the backbone during fine-tuning. This tests whether the representation is already linearly separable for the 5-class ECG task.
+  </Step>
+
+  <Step title="Train a linear classifier on 10% labeled data">
+    A single linear layer is added on top of the frozen 256-dim encoder output and trained on only **1,747 labeled samples** (10% of the training folds). This simulates a realistic low-annotation clinical deployment scenario.
+
+    ```bash
+    python -m ssrl_ecg.train_finetune \
+      --data-root data/PTB-XL \
+      --ssl-checkpoint checkpoints/ssl_simclr_enhanced.pt \
+      --epochs 20 \
+      --batch-size 64 \
+      --label-fraction 0.1 \
+      --seed 42 \
+      --out checkpoints/ssl_simclr_enhanced_finetuned.pt
+    ```
+  </Step>
+
+  <Step title="Evaluate on held-out test fold">
+    Evaluate the frozen encoder + linear head on fold 10 (2,194 samples). The reported metrics are macro-averaged AUROC and F1 across the 5 cardiovascular disease superclasses (NORM, MI, STTC, HYP, CD).
+
+    **SimCLR result**: AUROC 0.8717 ± 0.0032 | F1 0.6448 ± 0.0181 (10 seeds)
+  </Step>
+</Steps>
+
+<Note>
+The label-efficient setting uses **1,747 labeled samples** (10% of folds 1–8). This is intentionally constrained to demonstrate SSL's advantage over fully supervised training, which achieves only AUROC 0.8606 / F1 0.5750 under the same budget.
+</Note>

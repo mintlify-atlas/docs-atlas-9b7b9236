@@ -1,0 +1,193 @@
+---
+title: "Generate Publication-Ready ECG Classification Figures"
+sidebarTitle: "Visualization"
+description: "Use SSRL-ECG's visualization module to create 300 DPI publication figures: ROC curves, label efficiency plots, and robustness comparisons."
+---
+
+The `ssrl_ecg.visualization` module provides a small set of functions that produce consistent, publication-quality matplotlib figures for all key SSRL-ECG experiments. Every function calls `set_publication_style()` to enforce 300 DPI resolution, uniform font sizes, and tight bounding boxes — so figures are ready to drop into a paper or report without further editing.
+
+## Setting the Publication Style
+
+Before generating any figure, call `set_publication_style()` once. It configures global `rcParams` for the current Python session, affecting every subsequent `plt` call.
+
+```python
+from ssrl_ecg.visualization import set_publication_style
+
+set_publication_style()
+```
+
+### What it configures
+
+<ResponseField name="figure.dpi / savefig.dpi" type="int = 300">
+  Both screen display and saved files are rendered at 300 DPI, meeting the minimum requirement for most journal submissions.
+</ResponseField>
+
+<ResponseField name="figure.figsize" type="tuple = (8, 6)">
+  Default figure size in inches. Individual plot functions may override this for specific layouts (e.g. the robustness bar chart uses `(9, 6)`).
+</ResponseField>
+
+<ResponseField name="font.family / font.size" type="str / int">
+  Sans-serif font family at 11 pt base size, with axes labels at 12 pt and titles at 13 pt for clear readability at journal column widths.
+</ResponseField>
+
+<ResponseField name="axes.grid / grid.alpha" type="bool / float = True / 0.3">
+  Subtle background grid (30% opacity) aids quantitative reading without cluttering the figure.
+</ResponseField>
+
+<ResponseField name="savefig.bbox" type="str = 'tight'">
+  Saves figures with a tight bounding box to avoid whitespace around the axes, which is the expected format for most submission systems.
+</ResponseField>
+
+## `plot_roc_curve()`
+
+Plots a ROC curve for a binary or multi-label classifier, annotates the legend with the AUC value, and draws the random-classifier diagonal.
+
+```python
+from ssrl_ecg.visualization import plot_roc_curve, set_publication_style
+import matplotlib.pyplot as plt
+
+set_publication_style()
+fig, ax = plt.subplots()
+plot_roc_curve(y_true, y_prob, label='SimCLR', ax=ax, color='blue')
+plt.savefig('figures/roc_curve.png')
+```
+
+### Parameters
+
+<ParamField path="y_true" type="np.ndarray" required>
+  Ground-truth labels. Accepts 1-D binary arrays or 2-D multi-label matrices of shape `(N, C)`. For multi-label input, the mean across classes is used as the aggregate score.
+</ParamField>
+
+<ParamField path="y_prob" type="np.ndarray" required>
+  Predicted probabilities matching the shape of `y_true`. For multi-label input, the per-sample mean probability is used.
+</ParamField>
+
+<ParamField path="label" type="str" default='""'>
+  Legend label for this ROC curve. The computed AUC is appended automatically, e.g. `"SimCLR (AUC = 0.872)"`.
+</ParamField>
+
+<ParamField path="ax" type="matplotlib.axes.Axes" default="None">
+  Axes object to draw on. If `None`, a new figure and axes are created automatically.
+</ParamField>
+
+<ParamField path="color" type="str" default='"b"'>
+  Line colour for the ROC curve. Accepts any matplotlib colour string or hex code.
+</ParamField>
+
+### Return values
+
+<ResponseField name="fig" type="matplotlib.figure.Figure | None">
+  The figure object. Returns `None` if an existing `ax` was passed in (figure ownership remains with the caller).
+</ResponseField>
+
+<ResponseField name="ax" type="matplotlib.axes.Axes">
+  The axes object with the ROC curve drawn on it. Useful for overlaying multiple curves.
+</ResponseField>
+
+<ResponseField name="roc_auc" type="float">
+  The computed AUC value for this curve, calculated with `sklearn.metrics.auc`.
+</ResponseField>
+
+### Overlaying multiple models
+
+To compare several checkpoints on the same axes, pass the same `ax` object to each call:
+
+```python
+from ssrl_ecg.visualization import plot_roc_curve, set_publication_style
+import matplotlib.pyplot as plt
+
+set_publication_style()
+fig, ax = plt.subplots()
+
+_, ax, _ = plot_roc_curve(y_true, y_prob_simclr, label='SimCLR', ax=ax, color='steelblue')
+_, ax, _ = plot_roc_curve(y_true, y_prob_byol,   label='BYOL',   ax=ax, color='darkorange')
+_, ax, _ = plot_roc_curve(y_true, y_prob_sup,    label='Supervised', ax=ax, color='seagreen')
+
+plt.savefig('figures/roc_curve.png')
+```
+
+## Generating All Figures at Once
+
+The `generate_visualizations.py` script at the project root loads a fine-tuned checkpoint, runs inference on the PTB-XL test set, and writes all three publication figures to the `figures/` directory.
+
+```bash
+python generate_visualizations.py
+```
+
+<Steps>
+  <Step title="Ensure prerequisites">
+    The script requires a fine-tuned checkpoint at `checkpoints/ssl_finetuned_10pct.pt` and the PTB-XL dataset at `data/PTB-XL`. Make sure the `figures/` directory exists (it is created automatically).
+  </Step>
+
+  <Step title="Run the script">
+    ```bash
+    python generate_visualizations.py
+    ```
+
+    The script prints progress for each figure as it is saved:
+
+    ```
+    Generating publication-ready figures...
+
+    [1] Generating ROC curves...
+      Saved: figures/roc_curve.png
+
+    [2] Generating label efficiency curve...
+      Saved: figures/label_efficiency.png
+
+    [3] Generating robustness comparison...
+      Saved: figures/robustness_comparison.png
+
+    [OK] All figures generated successfully!
+    ```
+  </Step>
+
+  <Step title="Find the output files">
+    All figures are saved to the `figures/` directory at 300 DPI with tight bounding boxes.
+  </Step>
+</Steps>
+
+## Output Figures
+
+<CardGroup cols="3">
+  <Card title="figures/roc_curve.png" icon="chart-line">
+    ROC curves for each of the five cardiovascular classes plus the macro average. Shows per-class AUC and the random-classifier baseline diagonal.
+  </Card>
+  <Card title="figures/label_efficiency.png" icon="percent">
+    AUROC vs label fraction (log scale x-axis) for SSL fine-tuned and supervised baseline, with shaded ±1 std bands. Illustrates the SSL advantage at low label fractions.
+  </Card>
+  <Card title="figures/robustness_comparison.png" icon="shield">
+    Grouped bar chart comparing AUROC under clean, noisy (`noise_std=0.1`), and masked (`mask_ratio=0.2`) conditions for each model variant.
+  </Card>
+</CardGroup>
+
+## Evaluation Scripts in `evaluation/`
+
+The `evaluation/` directory contains four standalone scripts for deeper analysis. Each script is self-contained and can be run independently after checkpoints are available.
+
+<CardGroup cols="2">
+  <Card title="compare_baselines.py" icon="scale-balanced">
+    Evaluates SimCLR, BYOL, ResNet-1D, and supervised checkpoints side-by-side on the PTB-XL test set. Prints a ranked summary table sorted by AUROC and identifies the best-performing method.
+  </Card>
+  <Card title="per_class_analysis.py" icon="list">
+    Computes per-class AUROC for BCE baseline vs focal-loss + oversampling. Highlights improvements for underrepresented classes such as HYP and CD, which were the original focus of the class-balancing work.
+  </Card>
+  <Card title="compare_losses.py" icon="sliders">
+    Runs a comprehensive comparison of BCE vs focal-loss training strategies on the test set, printing absolute and percentage AUROC/F1 differences and flagging whether improvements are positive on both metrics.
+  </Card>
+  <Card title="generate_publication_report.py" icon="file-lines">
+    Combines multi-seed phase-2 results (from `results/phase2_multiseed_results.json`) with phase-3 baseline comparisons to produce a formatted markdown table and statistical significance report (t-test, Cohen's d).
+  </Card>
+</CardGroup>
+
+```bash
+# Run any evaluation script directly
+python evaluation/compare_baselines.py
+python evaluation/per_class_analysis.py
+python evaluation/compare_losses.py
+python evaluation/generate_publication_report.py
+```
+
+<Tip>
+  Run `generate_publication_report.py` last — it aggregates outputs from the other scripts and the multi-seed training runs into a single printable summary suitable for inclusion in a paper appendix.
+</Tip>

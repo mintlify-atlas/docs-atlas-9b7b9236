@@ -1,0 +1,259 @@
+---
+title: "Fine-tune SSL Encoder for ECG Classification"
+sidebarTitle: "Fine-Tuning"
+description: "Load a SimCLR or BYOL checkpoint and train an ECG classifier on 10% of PTB-XL labels. Reach AUROC 0.8717 and F1 0.6448 with focal loss and oversampling."
+---
+
+Fine-tuning transfers the representations learned during self-supervised pretraining into a downstream cardiovascular disease classifier. A linear classification head is attached to the frozen or unfrozen `ECGEncoder1DCNN` encoder, then trained on the labeled fraction of PTB-XL. With only 10% of labels (1,747 training samples) and focal loss combined with oversampling, the SimCLR encoder achieves an AUROC of **0.8717** and a macro-F1 of **0.6448** — a +12.15% F1 improvement over the supervised CNN baseline.
+
+## How It Works
+
+<Steps>
+  <Step title="Load the pretrained encoder">
+    The `.pt` checkpoint produced by `train_ssl_simclr.py` or `train_ssl_byol.py` is loaded and its `"encoder"` state dict is restored into `ECGEncoder1DCNN(in_ch=12, width=64)`.
+  </Step>
+  <Step title="Attach a classification head">
+    `ECGClassifier` wraps the encoder with a linear layer that maps the 256-dim latent to `n_classes=5` logits (one per PTB-XL diagnostic superclass: NORM, MI, STTC, HYP, CD).
+  </Step>
+  <Step title="Sample labeled data">
+    `sample_labelled_indices` stratifies the PTB-XL train split (folds 1–8) and returns the fraction specified by `--label-fraction` (default 10%).
+  </Step>
+  <Step title="Balance training data">
+    The data loader applies the strategy from `--balance-strategy` (`oversample` by default) to compensate for the 3.32× class imbalance between NORM and HYP.
+  </Step>
+  <Step title="Train with imbalance-aware loss">
+    `FocalLoss(alpha=0.25, gamma=2.0)` (default) down-weights easy negatives so the model focuses on hard positive examples from minority classes.
+  </Step>
+  <Step title="Save the best checkpoint">
+    The epoch with the highest validation macro-F1 is saved to `--out` as `{"model": <state_dict>}`.
+  </Step>
+</Steps>
+
+---
+
+## Training Commands
+
+<Tabs>
+  <Tab title="SimCLR Fine-Tuning">
+    ```bash
+    python -m ssrl_ecg.train_finetune \
+      --data-root data/PTB-XL \
+      --ssl-checkpoint checkpoints/ssl_simclr.pt \
+      --epochs 20 \
+      --batch-size 64 \
+      --lr 1e-3 \
+      --label-fraction 0.1 \
+      --signal-length 1000 \
+      --loss focal \
+      --balance-strategy oversample \
+      --seed 42 \
+      --out checkpoints/finetuned_simclr.pt
+    ```
+
+    **Result**: F1=0.6448, AUROC=0.8717
+
+    To use linear probing (freeze the encoder and train only the classification head), add the `--freeze-encoder` flag:
+
+    ```bash
+    python -m ssrl_ecg.train_finetune \
+      --ssl-checkpoint checkpoints/ssl_simclr.pt \
+      --freeze-encoder \
+      --epochs 20 \
+      --out checkpoints/finetuned_simclr_frozen.pt
+    ```
+  </Tab>
+
+  <Tab title="BYOL Fine-Tuning">
+    ```bash
+    python -m ssrl_ecg.train_finetune \
+      --data-root data/PTB-XL \
+      --ssl-checkpoint checkpoints/ssl_byol.pt \
+      --epochs 20 \
+      --batch-size 64 \
+      --lr 1e-3 \
+      --label-fraction 0.1 \
+      --signal-length 1000 \
+      --loss focal \
+      --balance-strategy oversample \
+      --seed 42 \
+      --out checkpoints/finetuned_byol.pt
+    ```
+
+    **Result**: F1=0.6301, AUROC=0.8565
+  </Tab>
+</Tabs>
+
+---
+
+## CLI Arguments
+
+<ParamField path="--data-root" type="Path" default="data/PTB-XL">
+  Root directory of the PTB-XL dataset. Must contain `ptbxl_database.csv`, `scp_statements.csv`, and a `records100/` folder with `.hea`/`.dat` files.
+</ParamField>
+
+<ParamField path="--ssl-checkpoint" type="Path" required>
+  Path to the pretrained SSL encoder checkpoint (`.pt` file produced by `train_ssl_simclr.py` or `train_ssl_byol.py`). This argument is **required** — there is no default. The checkpoint must contain an `"encoder"` key.
+</ParamField>
+
+<ParamField path="--epochs" type="int" default="20">
+  Number of fine-tuning epochs. The best model is tracked by validation macro-F1 and saved at the end, so additional epochs only help if the model keeps improving.
+</ParamField>
+
+<ParamField path="--batch-size" type="int" default="64">
+  Training batch size. Smaller than the SSL pretraining default because labeled data is scarce and the classification head benefits from careful gradient updates.
+</ParamField>
+
+<ParamField path="--lr" type="float" default="1e-3">
+  Learning rate for the Adam optimizer. Only parameters with `requires_grad=True` are updated — if `--freeze-encoder` is set, only the classification head is optimized.
+</ParamField>
+
+<ParamField path="--label-fraction" type="float" default="0.1">
+  Fraction of the PTB-XL training split to use as labeled data. `0.1` corresponds to approximately 1,747 samples out of 17,489. Valid range: `(0, 1]`.
+</ParamField>
+
+<ParamField path="--signal-length" type="int" default="1000">
+  Number of time steps per ECG record. At 100 Hz this equals 10 seconds. Must match the value used during SSL pretraining.
+</ParamField>
+
+<ParamField path="--freeze-encoder" type="flag">
+  When set, all encoder parameters have `requires_grad` set to `False` before training. Only the linear classification head is updated. This is true linear probing and is faster, but full fine-tuning (default, no flag) typically achieves higher performance.
+</ParamField>
+
+<ParamField path="--seed" type="int" default="42">
+  Global random seed passed to `set_seed()` for reproducible sampling, weight initialization, and data loading order.
+</ParamField>
+
+<ParamField path="--out" type="Path" default="checkpoints/finetuned.pt">
+  Path where the best checkpoint is saved. The file stores `{"model": <state_dict>}`. Parent directories are created automatically.
+</ParamField>
+
+<ParamField path="--loss" type="str" default="focal">
+  Loss function for the multi-label classification objective. Choices:
+
+  - `focal` — Focal Loss with `alpha=0.25, gamma=2.0`. **Recommended.**
+  - `bce` — Standard `BCEWithLogitsLoss`. Treats all classes equally.
+  - `weighted` — `WeightedBCELoss` with per-class weights computed by inverse frequency.
+  - `class_balanced` — `ClassBalancedLoss` with `beta=0.9999` based on effective number of samples.
+</ParamField>
+
+<ParamField path="--balance-strategy" type="str" default="oversample">
+  Data loader balancing strategy to address the 3.32× class imbalance in PTB-XL. Choices:
+
+  - `oversample` — Duplicate minority-class samples to equalize class frequency. **Recommended.**
+  - `stratified` — Stratified sampling ensures each batch reflects the true class distribution.
+  - `standard` — No rebalancing; samples are drawn in natural order.
+</ParamField>
+
+---
+
+## Loss Functions
+
+<Accordion title="Focal Loss (recommended)">
+  Focal Loss modifies the standard binary cross-entropy to down-weight well-classified examples:
+
+  ```
+  FL(p_t) = -alpha_t × (1 - p_t)^gamma × log(p_t)
+  ```
+
+  The default parameters `alpha=0.25` and `gamma=2.0` concentrate the gradient signal on hard misclassified samples — typically the minority cardiovascular disease classes (HYP, CD). This is the single most impactful choice for imbalanced ECG classification.
+
+  ```python
+  from ssrl_ecg.models.losses import FocalLoss
+  criterion = FocalLoss(alpha=0.25, gamma=2.0, reduction="mean")
+  ```
+</Accordion>
+
+<Accordion title="Weighted BCE">
+  Per-class weights are derived from inverse class frequency. A class appearing in 10% of samples gets 10× the weight of one appearing in 100% of samples. Useful when you want simple, interpretable class weighting.
+
+  ```python
+  from ssrl_ecg.models.losses import WeightedBCELoss, compute_class_weights
+  weights = compute_class_weights(train_labels, method="inverse_frequency").to(device)
+  criterion = WeightedBCELoss(class_weights=weights, reduction="mean")
+  ```
+</Accordion>
+
+<Accordion title="Class-Balanced Loss">
+  Uses the effective number of samples `E_n = (1 - beta^n) / (1 - beta)` to compute per-class weights, following Cui et al. (2019). `beta=0.9999` is a soft smoothing factor.
+
+  ```python
+  from ssrl_ecg.models.losses import ClassBalancedLoss
+  class_counts = (train_labels == 1).sum(dim=0)
+  criterion = ClassBalancedLoss(class_counts, beta=0.9999, reduction="mean")
+  ```
+</Accordion>
+
+<Accordion title="Standard BCE">
+  `torch.nn.BCEWithLogitsLoss` with no class weighting. Use as a sanity-check baseline when you want to isolate the effect of loss choice, but expect lower performance on minority classes.
+</Accordion>
+
+---
+
+## Data Balancing Strategies
+
+The PTB-XL training set has a 3.32× imbalance ratio (NORM: 9,514 vs HYP: 2,649). The `--balance-strategy` argument controls how `create_balanced_dataloader` addresses this:
+
+| Strategy | Behavior | Use Case |
+|---|---|---|
+| `oversample` | Minority classes are duplicated until frequencies are equalized | **Recommended** — best empirical performance |
+| `stratified` | Batches are assembled to reflect original class proportions | When you want unbiased gradient estimates |
+| `standard` | Standard PyTorch `DataLoader` shuffle; no resampling | Baseline comparison |
+
+<Warning>
+  Do not apply `oversample` to the validation or test sets. The val/test loaders always use `standard` ordering regardless of `--balance-strategy`.
+</Warning>
+
+---
+
+## Results
+
+| Encoder | Loss | Balance | AUROC | F1 Macro | Sensitivity | Specificity |
+|---|---|---|---|---|---|---|
+| SimCLR | focal | oversample | **0.8717** | **0.6448** | 0.6831 | 0.9411 |
+| BYOL | focal | oversample | 0.8565 | 0.6301 | 0.6648 | 0.9278 |
+
+<Note>
+  SimCLR fine-tuning outperforms the supervised CNN baseline (AUROC=0.8606, F1=0.5750) by **+12.15% F1** using the same labeled data fraction.
+</Note>
+
+---
+
+## Loading a Saved Checkpoint
+
+After fine-tuning, the best model is saved as `{"model": <state_dict>}`. To reload it for evaluation or inference:
+
+```python
+import torch
+from ssrl_ecg.models.cnn import ECGClassifier, ECGEncoder1DCNN
+
+# Reconstruct the model
+encoder = ECGEncoder1DCNN(in_ch=12, width=64)
+model = ECGClassifier(encoder=encoder, n_classes=5)
+
+# Load the fine-tuned weights
+ckpt = torch.load("checkpoints/finetuned.pt", map_location="cpu")
+model.load_state_dict(ckpt["model"])
+model.eval()
+
+# Run inference
+with torch.no_grad():
+    logits = model(ecg_tensor)          # shape: (batch, 5)
+    probs = torch.sigmoid(logits)       # multi-label probabilities
+```
+
+<Tip>
+  Always pass `map_location="cpu"` when loading on a machine that may not have the same GPU configuration as the training machine. Move to GPU afterwards with `model.to(device)`.
+</Tip>
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="SSL Pretraining" icon="brain" href="/training/ssl-pretraining">
+    Generate the SSL encoder checkpoint that feeds into this fine-tuning pipeline.
+  </Card>
+  <Card title="Supervised Baseline" icon="chart-bar" href="/training/supervised-baseline">
+    See how much SSL pretraining improves over training the same CNN from scratch.
+  </Card>
+</CardGroup>

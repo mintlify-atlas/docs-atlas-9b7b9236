@@ -1,0 +1,212 @@
+---
+title: "Evaluating ECG Model Performance: AUROC, F1, Sensitivity"
+sidebarTitle: "Metrics"
+description: "Comprehensive guide to SSRL-ECG evaluation metrics, the evaluate CLI, robustness testing, and multi-seed validation results on PTB-XL."
+---
+
+The SSRL-ECG framework evaluates cardiovascular disease classification across five diagnostic superclasses using four complementary metrics drawn from clinical practice. Each metric addresses a different aspect of model quality, from class discrimination to signal-level robustness, giving you a complete picture of how a checkpoint will behave under real-world conditions.
+
+## Metric Definitions
+
+Understanding what each metric measures — and why it matters clinically — is essential before interpreting results or comparing checkpoints.
+
+### AUROC (Area Under the ROC Curve)
+
+AUROC summarises a model's ability to discriminate between positive and negative cases across all decision thresholds. A value of 1.0 indicates perfect separation; 0.5 is random. In multi-label ECG classification, **macro AUROC** averages the per-class AUC scores, giving equal weight to each of the five cardiovascular conditions regardless of class frequency. This makes it the primary headline metric for comparing SSL and supervised checkpoints.
+
+### F1 Score (Macro)
+
+F1 is the harmonic mean of precision and recall. Using **macro averaging** treats all five classes equally, preventing common classes like NORM from dominating the score. At the default threshold of `0.5`, sigmoid probabilities are binarised and F1 is computed. F1 is especially useful for quantifying the real-world trade-off when both false positives and false negatives carry clinical cost.
+
+### Sensitivity (Micro)
+
+Sensitivity — the true positive rate — measures what fraction of actual disease cases the model correctly flags. It is computed **micro-averaged** across all classes and samples, meaning a single missed MI or HYP prediction directly lowers the score. For cardiovascular screening, sensitivity is critical: missed diagnoses carry higher clinical cost than false alarms.
+
+### Specificity (Micro)
+
+Specificity — the true negative rate — measures what fraction of healthy samples are correctly left unflagged. High specificity reduces alert fatigue in clinical workflows. Like sensitivity, it is computed micro-averaged across all five classes.
+
+## `multilabel_metrics()` Function
+
+All four metrics are computed by the `multilabel_metrics` utility in `ssrl_ecg.utils`. Probabilities are converted to binary predictions using a default threshold of `0.5`.
+
+```python
+from ssrl_ecg.utils import multilabel_metrics
+
+metrics = multilabel_metrics(y_true, y_prob, threshold=0.5)
+```
+
+**Parameters**
+
+<ParamField path="y_true" type="np.ndarray" required>
+  Ground-truth binary label matrix of shape `(N, C)` where `N` is the number of samples and `C` is the number of classes (5 for PTB-XL).
+</ParamField>
+
+<ParamField path="y_prob" type="np.ndarray" required>
+  Predicted probability matrix of shape `(N, C)`, output of `torch.sigmoid(logits)`.
+</ParamField>
+
+<ParamField path="threshold" type="float" default="0.5">
+  Decision threshold for converting probabilities to binary predictions. Values at or above the threshold are predicted positive.
+</ParamField>
+
+**Return values**
+
+<ResponseField name="f1_macro" type="float">
+  Macro-averaged F1 score across all five cardiovascular classes. Computed with `zero_division=0` to handle classes absent from a batch.
+</ResponseField>
+
+<ResponseField name="auroc_macro" type="float">
+  Macro-averaged AUROC. Per-class AUC is computed only for classes that have both positive and negative samples; the mean is taken over those valid classes.
+</ResponseField>
+
+<ResponseField name="sensitivity_micro" type="float">
+  Micro-averaged sensitivity (true positive rate): `TP / (TP + FN)`. A small epsilon (`1e-8`) prevents division by zero.
+</ResponseField>
+
+<ResponseField name="specificity_micro" type="float">
+  Micro-averaged specificity (true negative rate): `TN / (TN + FP)`. A small epsilon prevents division by zero.
+</ResponseField>
+
+## `evaluate.py` CLI
+
+The `evaluate` module runs a trained checkpoint against the PTB-XL test set (fold 10) and prints all four metrics. It also supports signal corruption via `--noise-std` and `--mask-ratio` for robustness testing.
+
+```bash
+python -m ssrl_ecg.evaluate \
+  --checkpoint checkpoints/ssl_simclr_enhanced_finetuned.pt \
+  --data-root data/PTB-XL
+```
+
+### Arguments
+
+<ParamField path="--checkpoint" type="Path" required>
+  Path to the model checkpoint file (`.pt`). The checkpoint must contain a `model` key with the full `ECGClassifier` state dict.
+</ParamField>
+
+<ParamField path="--data-root" type="Path" default="data/PTB-XL">
+  Root directory of the PTB-XL dataset. Must contain `ptbxl_database.csv`, `scp_statements.csv`, and the `records100/` or `records500/` subdirectory.
+</ParamField>
+
+<ParamField path="--batch-size" type="int" default="64">
+  Number of samples per inference batch. Reduce if GPU memory is limited.
+</ParamField>
+
+<ParamField path="--signal-length" type="int" default="1000">
+  Number of time-steps per ECG sample (1,000 corresponds to 10 seconds at 100 Hz).
+</ParamField>
+
+<ParamField path="--noise-std" type="float" default="0.0">
+  Standard deviation of additive Gaussian noise applied to each signal before inference. Set to `0.1` to simulate moderate measurement noise. Uses `CorruptedWrapper` internally.
+</ParamField>
+
+<ParamField path="--mask-ratio" type="float" default="0.0">
+  Fraction of the time dimension zeroed out as a contiguous block. Set to `0.2` to simulate 20% signal dropout. Uses `CorruptedWrapper` internally.
+</ParamField>
+
+## Robustness Testing with `CorruptedWrapper`
+
+The `CorruptedWrapper` class wraps any `PTBXLRecordDataset` and applies on-the-fly signal degradation to test how well a checkpoint generalises under real-world noise sources such as motion artifacts or electrode dropout.
+
+```python
+from ssrl_ecg.evaluate import CorruptedWrapper
+from ssrl_ecg.data.ptbxl import PTBXLRecordDataset
+
+# Base test split
+base_ds = PTBXLRecordDataset(data_root, db_df, labels, test_idx)
+
+# Additive noise: simulates electrode interference
+noisy_ds = CorruptedWrapper(base_ds, noise_std=0.1)
+
+# Temporal masking: simulates signal dropout
+masked_ds = CorruptedWrapper(base_ds, mask_ratio=0.2)
+```
+
+To run both corruption modes from the command line:
+
+<Tabs>
+  <Tab title="Additive Noise">
+    ```bash
+    python -m ssrl_ecg.evaluate \
+      --checkpoint checkpoints/ssl_simclr_enhanced_finetuned.pt \
+      --noise-std 0.1
+    ```
+  </Tab>
+  <Tab title="Temporal Masking">
+    ```bash
+    python -m ssrl_ecg.evaluate \
+      --checkpoint checkpoints/ssl_simclr_enhanced_finetuned.pt \
+      --mask-ratio 0.2
+    ```
+  </Tab>
+  <Tab title="Combined">
+    ```bash
+    python -m ssrl_ecg.evaluate \
+      --checkpoint checkpoints/ssl_simclr_enhanced_finetuned.pt \
+      --noise-std 0.1 \
+      --mask-ratio 0.2
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  The corruption is applied **after** loading the raw signal and **before** passing it to the model. This mirrors realistic inference conditions where signal quality cannot be controlled.
+</Note>
+
+## Benchmark Results
+
+The table below shows clean-signal test-set performance for all three training strategies evaluated on PTB-XL fold 10 (2,194 samples across 5 cardiovascular classes).
+
+| Method | AUROC | F1 | Sensitivity | Specificity |
+|---|---|---|---|---|
+| Supervised (Focal+Oversample) | 0.8606 | 0.5750 | 0.6772 | 0.9357 |
+| SimCLR + Augmentations | **0.8717** | **0.6448** | **0.6831** | **0.9411** |
+| BYOL + Augmentations | 0.8565 | 0.6301 | 0.6648 | 0.9278 |
+
+<Tip>
+  SimCLR with domain-adaptive augmentations outperforms the supervised focal-loss baseline by **+12.15% F1** (0.5750 → 0.6448) and **+0.0111 AUROC**, while achieving per-class sensitivity ≥ 0.61 across all five cardiovascular classes.
+</Tip>
+
+### Per-Class Coverage
+
+All five diagnostic classes exceed the 0.61 sensitivity threshold after SimCLR fine-tuning:
+
+<CardGroup cols="5">
+  <Card title="NORM" icon="heart">
+    Normal sinus rhythm — largest class (9,514 training samples)
+  </Card>
+  <Card title="MI" icon="heart-crack">
+    Myocardial infarction — 5,469 training samples
+  </Card>
+  <Card title="STTC" icon="wave-square">
+    ST/T-wave changes — 5,235 training samples
+  </Card>
+  <Card title="HYP" icon="arrow-up">
+    Left ventricular hypertrophy — 2,649 training samples
+  </Card>
+  <Card title="CD" icon="bolt">
+    Conduction disturbance — 4,898 training samples
+  </Card>
+</CardGroup>
+
+## Multi-Seed Validation
+
+To confirm that results are not seed-dependent, SimCLR fine-tuning was repeated across 10 random seeds using `scripts/run_multiseed_training.py`.
+
+```bash
+python scripts/run_multiseed_training.py \
+  --model simclr \
+  --seeds 42 52 62 72 82 92 102 112 122 132 \
+  --label-fraction 0.1
+```
+
+**Results across 10 seeds:**
+
+| Metric | Mean | Std | 95% CI |
+|---|---|---|---|
+| AUROC (macro) | 0.8717 | ±0.0032 | 0.8671 – 0.8763 |
+| F1 (macro) | 0.6448 | ±0.0181 | — |
+
+<Info>
+  The narrow 95% confidence interval on AUROC (0.0092 wide) confirms that the SimCLR improvements are statistically robust and not artifacts of a single lucky seed.
+</Info>

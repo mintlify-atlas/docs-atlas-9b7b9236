@@ -1,0 +1,220 @@
+---
+title: "Train Supervised CNN Baseline from Scratch"
+sidebarTitle: "Supervised Baseline"
+description: "Train ECGEncoder1DCNN directly on 10% of PTB-XL labels using focal loss and oversampling. Establishes the AUROC=0.8606, F1=0.5750 baseline that SSL must beat."
+---
+
+The supervised baseline trains the same `ECGEncoder1DCNN` architecture used in SSL pretraining, but entirely from scratch on a labeled subset of PTB-XL. No pretrained weights are loaded; the encoder and classification head are randomly initialized and optimized jointly with focal loss and oversampling. This baseline establishes the performance ceiling achievable without self-supervised pretraining — the number that SSL fine-tuning must surpass to justify the additional pretraining cost.
+
+With 10% of PTB-XL labels (≈1,747 samples), focal loss, and the `oversample` balancing strategy, the supervised CNN achieves **AUROC=0.8606** and **F1=0.5750**. Multi-seed validation across 10 seeds yields **0.8699 ± 0.0034 AUROC**, confirming the result is stable.
+
+<Note>
+  SimCLR fine-tuning achieves F1=0.6448 on the same labeled data — a **+12.15% F1 improvement** over this supervised baseline. The SSL gain is statistically robust across seeds.
+</Note>
+
+---
+
+## Architecture
+
+The supervised model uses identical components to the fine-tuning pipeline:
+
+- **Encoder**: `ECGEncoder1DCNN(in_ch=12, width=64)` — three stacked Conv1D blocks producing a 256-dim latent from a 12-lead input of length 1000
+- **Classifier**: `ECGClassifier` — linear head mapping 256 dims to 5 class logits (NORM, MI, STTC, HYP, CD)
+- **Optimizer**: Adam, `lr=1e-3`
+- **Loss**: `FocalLoss(alpha=0.25, gamma=2.0)` by default
+
+The only structural difference from fine-tuning is that the encoder starts from random initialization rather than from SSL-pretrained weights.
+
+---
+
+## Training Command
+
+```bash
+python -m ssrl_ecg.train_supervised \
+  --data-root data/PTB-XL \
+  --epochs 20 \
+  --batch-size 64 \
+  --lr 1e-3 \
+  --label-fraction 0.1 \
+  --signal-length 1000 \
+  --loss focal \
+  --balance-strategy oversample \
+  --seed 42 \
+  --out checkpoints/supervised.pt
+```
+
+---
+
+## CLI Arguments
+
+<ParamField path="--data-root" type="Path" default="data/PTB-XL">
+  Root directory of the PTB-XL dataset. Expected to contain `ptbxl_database.csv`, `scp_statements.csv`, and `records100/` with per-record `.hea`/`.dat` files.
+</ParamField>
+
+<ParamField path="--epochs" type="int" default="20">
+  Number of full training passes over the sampled labeled split. The checkpoint saved at `--out` corresponds to the epoch with the highest validation macro-F1.
+</ParamField>
+
+<ParamField path="--batch-size" type="int" default="64">
+  Samples per optimization step. With only 1,747 training samples at 10% label fraction, small batches (64) provide more gradient updates per epoch than the SSL pretraining batch size (256).
+</ParamField>
+
+<ParamField path="--lr" type="float" default="1e-3">
+  Learning rate for the Adam optimizer. Applied to all model parameters (encoder + head) jointly.
+</ParamField>
+
+<ParamField path="--label-fraction" type="float" default="0.1">
+  Fraction of the PTB-XL training folds (1–8) to use as labeled data. `0.1` yields approximately 1,747 samples. Keeping this at `0.1` matches the published SSL comparison results.
+</ParamField>
+
+<ParamField path="--signal-length" type="int" default="1000">
+  Time steps loaded per ECG record. At PTB-XL's 100 Hz resolution, `1000` equals 10 seconds — the full recording length.
+</ParamField>
+
+<ParamField path="--seed" type="int" default="42">
+  Global random seed for `set_seed()`. Controls labeled-sample selection, weight initialization, and data loader shuffle order.
+</ParamField>
+
+<ParamField path="--out" type="Path" default="checkpoints/supervised.pt">
+  Path for the saved checkpoint. Written as `{"model": <state_dict>}` at the end of training. Parent directories are created automatically.
+</ParamField>
+
+<ParamField path="--loss" type="str" default="focal">
+  Loss function for the multi-label classification objective. Choices:
+
+  - `focal` — `FocalLoss(alpha=0.25, gamma=2.0)`. **Recommended** — best empirical performance.
+  - `bce` — `BCEWithLogitsLoss`. No class weighting.
+  - `weighted` — `WeightedBCELoss` using inverse-frequency per-class weights.
+  - `class_balanced` — `ClassBalancedLoss(beta=0.9999)` based on effective sample counts.
+</ParamField>
+
+<ParamField path="--balance-strategy" type="str" default="oversample">
+  Strategy used by `create_balanced_dataloader` to handle the 3.32× class imbalance in PTB-XL. Choices:
+
+  - `oversample` — Minority classes are oversampled to equalize frequencies. **Recommended.**
+  - `stratified` — Each batch is assembled to match original class proportions.
+  - `standard` — No rebalancing; standard shuffle only.
+</ParamField>
+
+---
+
+## Focal Loss and Class Imbalance
+
+PTB-XL has a pronounced label imbalance: NORM appears 9,514 times while HYP appears only 2,649 times in the full dataset. At 10% label fraction these differences are amplified. Two mechanisms work together to address this:
+
+**Focal Loss** (`--loss focal`) modifies BCE by adding a modulating factor `(1 - p_t)^gamma` that reduces the loss contribution of easy-to-classify (high-confidence) examples:
+
+```python
+from ssrl_ecg.models.losses import FocalLoss
+
+# alpha=0.25 down-weights the negative class contribution
+# gamma=2.0 focuses learning on hard examples
+criterion = FocalLoss(alpha=0.25, gamma=2.0, reduction="mean")
+```
+
+**Oversampling** (`--balance-strategy oversample`) ensures the data loader presents minority classes at the same effective frequency as majority classes, preventing the gradient from being dominated by NORM samples.
+
+<Info>
+  The `focal + oversample` combination achieves the published F1=0.5750. The `bce + standard` combination is used as an alternative baseline in the multi-seed statistical comparison to confirm that loss and balancing choices matter.
+</Info>
+
+---
+
+## Multi-Seed Validation
+
+Single-seed results can be misleading due to random variation in labeled sample selection. The `scripts/train_supervised_multiseed.py` script runs the full training loop across 10 random seeds for two configurations (`bce+standard` and `focal+oversample`) and reports means, standard deviations, 95% confidence intervals, and an independent samples t-test.
+
+```bash
+# Full 10-seed run (recommended for publication)
+python scripts/train_supervised_multiseed.py
+
+# Quick 3-seed run for development
+python scripts/train_supervised_multiseed.py --quick
+```
+
+The script runs over seeds `[42, 52, 62, 72, 82, 92, 102, 112, 122, 132]` and saves per-seed checkpoints as:
+
+```
+checkpoints/multiseed_focal_oversample_seed042.pt
+checkpoints/multiseed_focal_oversample_seed052.pt
+...
+```
+
+Statistical results are written to `results/phase2_multiseed_results.json` with the following structure:
+
+```json
+{
+  "focal_oversample": {
+    "auroc": { "mean": 0.8699, "std": 0.0034, "ci_95": [0.8640, 0.8760] },
+    "f1":   { "mean": 0.5750, "std": 0.0120 }
+  },
+  "significance_test": {
+    "t_statistic": -4.32,
+    "p_value": 0.0008,
+    "cohens_d": 1.93,
+    "significant": true
+  }
+}
+```
+
+<Tip>
+  Use `--quick` during development to run 3 seeds with 5 epochs each. This confirms your setup is working before committing to the full 20-run experiment.
+</Tip>
+
+---
+
+## Results
+
+### Single Seed (seed=42)
+
+| Loss | Balance | AUROC | F1 Macro | Sensitivity | Specificity |
+|---|---|---|---|---|---|
+| focal | oversample | **0.8606** | **0.5750** | 0.6772 | 0.9357 |
+
+### Multi-Seed (10 seeds: 42–132)
+
+| Metric | Mean | Std | 95% CI |
+|---|---|---|---|
+| AUROC | **0.8699** | ±0.0034 | 0.8640 – 0.8760 |
+| F1 Macro | **0.5750** | ±0.0120 | — |
+
+### SSL Comparison
+
+| Method | AUROC | F1 Macro | Δ F1 vs Supervised |
+|---|---|---|---|
+| Supervised (focal+oversample) | 0.8606 | 0.5750 | — |
+| BYOL + fine-tune | 0.8565 | 0.6301 | +9.58% |
+| SimCLR + fine-tune | **0.8717** | **0.6448** | **+12.15%** |
+
+<Note>
+  SSL pretraining with SimCLR achieves a **+12.15% improvement in macro-F1** over this supervised baseline using the same labeled data, the same architecture, and the same focal loss + oversampling configuration.
+</Note>
+
+---
+
+## Loading the Supervised Checkpoint
+
+```python
+import torch
+from ssrl_ecg.models.cnn import ECGClassifier, ECGEncoder1DCNN
+
+encoder = ECGEncoder1DCNN(in_ch=12, width=64)
+model = ECGClassifier(encoder=encoder, n_classes=5)
+
+ckpt = torch.load("checkpoints/supervised.pt", map_location="cpu")
+model.load_state_dict(ckpt["model"])
+model.eval()
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="SSL Pretraining" icon="brain" href="/training/ssl-pretraining">
+    Pretrain the encoder without labels to push F1 above the 0.5750 baseline.
+  </Card>
+  <Card title="Fine-Tuning" icon="sliders" href="/training/fine-tuning">
+    Transfer a pretrained SSL encoder to classification and compare against this baseline.
+  </Card>
+</CardGroup>

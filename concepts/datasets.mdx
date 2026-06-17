@@ -1,0 +1,152 @@
+---
+title: "Datasets: PTB-XL and MIT-BIH for ECG SSL"
+sidebarTitle: "Datasets"
+description: "Setup guide for PTB-XL (21,799 ECGs, 5 classes, 10-fold split) and MIT-BIH (48 records) used for SSRL-ECG pretraining, fine-tuning, and robustness evaluation."
+---
+
+SSRL-ECG uses two publicly available PhysioNet datasets. PTB-XL is the primary training and evaluation dataset — a large-scale 12-lead ECG library with standardized diagnostic labels and a pre-defined 10-fold stratified split. MIT-BIH Arrhythmia Database serves as an independent external benchmark to test how well representations learned on PTB-XL transfer to a different recording protocol and patient population.
+
+<Warning>
+The package loader expects a specific folder hierarchy under your `data/` directory. Placing files in a different layout will cause `FileNotFoundError` at runtime. See the [required folder structure](#required-folder-structure) below before downloading.
+</Warning>
+
+---
+
+## PTB-XL — Primary Dataset
+
+PTB-XL is a 12-lead clinical ECG database collected at the Physikalisch-Technische Bundesanstalt in Berlin. It is the largest openly available annotated 12-lead ECG dataset and forms the backbone of all SSRL-ECG pretraining, fine-tuning, and evaluation experiments.
+
+### Recording Specifications
+
+| Property | Value |
+|---|---|
+| Total ECGs | 21,799 |
+| Unique patients | 18,869 |
+| Leads | 12 (standard clinical layout) |
+| Sampling rate | 500 Hz (high-res) / 100 Hz (low-res) |
+| Recording duration | 10 seconds per ECG |
+| Signal length at 500 Hz | 5,000 samples per lead |
+
+### Diagnostic Superclasses
+
+PTB-XL labels are organized into five mutually non-exclusive cardiovascular disease superclasses. Each ECG can carry one or more labels:
+
+| Class | Full name | Sample count |
+|---|---|---|
+| NORM | Normal ECG | 9,514 |
+| MI | Myocardial Infarction | 5,469 |
+| STTC | ST/T-wave Changes | 5,235 |
+| CD | Conduction Disturbance | 4,898 |
+| HYP | Left Ventricular Hypertrophy | 2,649 |
+
+<Note>
+The class imbalance ratio is **3.32× (NORM vs. HYP)**. The supervised baseline addresses this with focal loss and oversampling. The SSL pretraining phase does not use labels, so class imbalance does not directly affect the contrastive or momentum objective — but it does affect the downstream linear probe.
+</Note>
+
+### 10-Fold Split
+
+PTB-XL ships with a pre-assigned `strat_fold` column (1–10) for reproducible stratified splitting. SSRL-ECG maps these folds to fixed train / validation / test partitions:
+
+| Split | Folds | Samples |
+|---|---|---|
+| **Train** | 1–8 | 17,489 |
+| **Validation** | 9 | 2,154 |
+| **Test** | 10 | 2,194 |
+
+The label-efficient fine-tuning experiment draws **1,747 labeled samples** — exactly 10% of the training split — while the SSL pretraining uses all 17,489 training recordings without labels.
+
+---
+
+## MIT-BIH Arrhythmia Database — External Validation
+
+The MIT-BIH Arrhythmia Database provides 48 half-hour two-lead ambulatory ECG recordings from 47 subjects, sampled at 360 Hz with beat-level arrhythmia annotations. In SSRL-ECG it is used exclusively as an **external robustness check**: representations pretrained on PTB-XL are evaluated on MIT-BIH data to assess domain generalization without any fine-tuning on MIT-BIH itself.
+
+| Property | Value |
+|---|---|
+| Records | 48 |
+| Annotation type | Beat-level arrhythmia labels |
+| Leads | 2 (modified limb lead II + V-lead) |
+| Sampling rate | 360 Hz |
+| Record duration | ~30 minutes each |
+| Use in SSRL-ECG | External transfer / robustness validation |
+
+---
+
+## Required Folder Structure
+
+Both datasets must be organized under a single `data/` directory at your project root. The PTB-XL loader reads `ptbxl_database.csv` for metadata and `scp_statements.csv` for diagnostic code mappings; the signal files are located via the `filename_lr` (100 Hz) and `filename_hr` (500 Hz) columns in the CSV.
+
+```text
+data/
+├── PTB-XL/
+│   ├── ptbxl_database.csv        # metadata + fold assignments
+│   ├── scp_statements.csv        # diagnostic code → superclass mapping
+│   ├── records100/               # 100 Hz downsampled recordings
+│   │   ├── 00000/
+│   │   │   ├── *.hea             # WFDB header files
+│   │   │   └── *.dat             # raw signal data
+│   │   └── ...
+│   └── records500/               # 500 Hz full-resolution recordings
+│       ├── 00000/
+│       │   ├── *.hea
+│       │   └── *.dat
+│       └── ...
+└── MIT-BIH/
+    └── files/
+        └── mitdb/
+            └── 1.0.0/
+                ├── *.hea         # WFDB header files
+                ├── *.dat         # raw signal data
+                └── *.atr         # beat annotation files
+```
+
+<Note>
+PTB-XL ships signal files at two resolutions. SSRL-ECG defaults to **500 Hz** (`records500/`) for all pretraining and fine-tuning experiments. The `records100/` directory (100 Hz) is available for faster prototyping or resource-constrained environments — signal length becomes 1,000 samples at 100 Hz instead of 5,000 at 500 Hz. Pass `--signal-length 1000` to training scripts when using the lower-resolution records.
+</Note>
+
+---
+
+## Downloading the Datasets
+
+<CardGroup cols={2}>
+  <Card title="PTB-XL on PhysioNet" icon="database" href="https://physionet.org/content/ptb-xl/1.0.3/">
+    Download PTB-XL v1.0.3 from PhysioNet. Requires a free PhysioNet account. The full dataset is ~2.1 GB compressed.
+  </Card>
+  <Card title="MIT-BIH on PhysioNet" icon="database" href="https://physionet.org/content/mitdb/1.0.0/">
+    Download MIT-BIH Arrhythmia Database v1.0.0 from PhysioNet. Approximately 106 MB compressed.
+  </Card>
+</CardGroup>
+
+After downloading, unzip both archives and arrange the files to match the folder structure shown above. PTB-XL's archive already contains the `records100/` and `records500/` subdirectories — move the top-level folder to `data/PTB-XL/`. For MIT-BIH, create the `data/MIT-BIH/files/mitdb/1.0.0/` path and place all `.hea`, `.dat`, and `.atr` files directly inside it.
+
+---
+
+## Verifying Your Dataset Setup
+
+Run the built-in analysis script to confirm both datasets are correctly placed and print class distribution statistics:
+
+```bash
+python -m ssrl_ecg.analyze_datasets --ptbxl-root data/PTB-XL
+```
+
+Expected output:
+
+```text
+PTB-XL rows: 21799
+PTB-XL unique patients: 18869
+PTB-XL fold sizes: {'train(1-8)': 17489, 'val(9)': 2154, 'test(10)': 2194}
+PTB-XL superclass counts:
+  NORM: 9514
+  MI: 5469
+  STTC: 5235
+  HYP: 2649
+  CD: 4898
+PTB-XL availability: {'lr_dat': '21799/21799', 'hr_dat': '21799/21799'}
+MIT-BIH availability: {'hea': 48, 'dat': 48, 'atr': 48}
+```
+
+The `availability` lines confirm that all signal `.dat` files referenced in `ptbxl_database.csv` are present on disk, and that all 48 MIT-BIH records have their header, data, and annotation files. Any count below the expected value indicates missing files that need to be re-downloaded.
+
+<Warning>
+If `lr_dat` or `hr_dat` availability is below `21799/21799`, the dataset loader will silently skip missing records during training, which can skew class distributions in the training batches. Always verify 100% file availability before starting a pretraining run.
+</Warning>

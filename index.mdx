@@ -1,20 +1,112 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "SSRL-ECG: Self-Supervised ECG Classification"
+sidebarTitle: "Home"
+description: "A research framework for self-supervised ECG cardiovascular disease classification. Achieves 0.8717 AUROC with only 10% labeled data using domain-adaptive augmentations."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+SSRL-ECG is a self-supervised representation learning framework for ECG-based cardiovascular disease classification in low-data regimes. It combines domain-adaptive augmentations engineered specifically for cardiac signals with SimCLR and BYOL pretraining frameworks, enabling accurate multi-label classification with as few as 1,747 labeled samples from the PTB-XL dataset.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Set up your Python environment and install the `ssrl-ecg` package with all dependencies.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run SSL pretraining and fine-tuning end-to-end in under 30 minutes.
+  </Card>
+  <Card title="SSL Concepts" icon="brain" href="/concepts/self-supervised-learning">
+    Understand SimCLR, BYOL, and why self-supervised learning excels with limited labels.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/models/ecg-encoder">
+    Explore the full Python API — models, augmentations, losses, and utilities.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## What is SSRL-ECG?
+
+Standard supervised learning for ECG diagnosis requires large amounts of labeled data — a bottleneck in clinical settings where expert annotation is expensive and time-consuming. SSRL-ECG addresses this by pretraining a 1D CNN encoder on unlabeled ECGs using contrastive objectives, then fine-tuning on just 10% of labels.
+
+The framework achieves:
+
+| Method | AUROC | F1 | Sensitivity | Specificity |
+|---|---|---|---|---|
+| Supervised (Focal + Oversample) | 0.8606 | 0.5750 | 0.6772 | 0.9357 |
+| **SimCLR + Augmentations** | **0.8717** | **0.6448** | **0.6831** | **0.9411** |
+| BYOL + Augmentations | 0.8565 | 0.6301 | 0.6648 | 0.9278 |
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Domain-Adaptive Augmentations" icon="dna" href="/concepts/domain-adaptive-augmentations">
+    7 ECG-specific augmentations: frequency warping, medical mixup, bandpass filtering, CutMix, motion artifacts, per-channel noise, and temporal dropout.
+  </Card>
+  <Card title="SimCLR Pretraining" icon="arrows-rotate" href="/training/ssl-pretraining">
+    Contrastive learning with NT-Xent loss on unlabeled ECGs. Achieves 0.8717 AUROC after fine-tuning on 10% labels.
+  </Card>
+  <Card title="BYOL Pretraining" icon="rotate" href="/training/ssl-pretraining">
+    Momentum-based self-supervised learning as an alternative to contrastive approaches.
+  </Card>
+  <Card title="Label Scarcity Benchmark" icon="chart-bar" href="/evaluation/label-scarcity">
+    Systematic comparison of SSL vs. supervised learning across label fractions from 1% to 100%.
+  </Card>
+  <Card title="Multi-Seed Validation" icon="shield-check" href="/guides/reproducibility">
+    Statistical robustness via 10 random seeds with 95% confidence intervals.
+  </Card>
+  <Card title="Transfer to MIT-BIH" icon="heart-pulse" href="/evaluation/transfer-mitbih">
+    External validation on the MIT-BIH arrhythmia dataset for out-of-distribution robustness.
+  </Card>
+</CardGroup>
+
+## Getting Started
+
+<Steps>
+  <Step title="Install the package">
+    Create a virtual environment and install `ssrl-ecg` in editable mode:
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate  # Windows: .venv\Scripts\Activate.ps1
+    pip install -e .
+    ```
+  </Step>
+  <Step title="Prepare PTB-XL data">
+    Download the [PTB-XL dataset](https://physionet.org/content/ptb-xl/1.0.3/) and place it under `data/PTB-XL/` following the expected folder structure.
+  </Step>
+  <Step title="Pretrain with SimCLR">
+    Run self-supervised pretraining on unlabeled ECGs:
+    ```bash
+    python -m ssrl_ecg.train_ssl_simclr \
+      --data-root data/PTB-XL \
+      --epochs 20 \
+      --batch-size 128 \
+      --out checkpoints/ssl_simclr.pt
+    ```
+  </Step>
+  <Step title="Fine-tune on labeled data">
+    Fine-tune the pretrained encoder with 10% labeled samples:
+    ```bash
+    python -m ssrl_ecg.train_finetune \
+      --data-root data/PTB-XL \
+      --ssl-checkpoint checkpoints/ssl_simclr.pt \
+      --label-fraction 0.1 \
+      --out checkpoints/finetuned.pt
+    ```
+  </Step>
+</Steps>
+
+## Project Structure
+
+The `ssrl_ecg` package lives under `src/ssrl_ecg/` and provides both importable Python modules and CLI entry points invokable via `python -m ssrl_ecg.<module>`.
+
+<CardGroup cols={2}>
+  <Card title="Training Scripts" icon="terminal" href="/training/ssl-pretraining">
+    `train_ssl_simclr`, `train_ssl_byol`, `train_supervised`, `train_finetune`
+  </Card>
+  <Card title="Models" icon="microchip" href="/api/models/ecg-encoder">
+    `ECGEncoder1DCNN`, `SimCLRModel`, `BYOLModel`, `ResNet1D`, `ECGClassifier`
+  </Card>
+  <Card title="Augmentations" icon="wand-magic-sparkles" href="/api/augmentations/ecg-augmentations">
+    `ECGAugmentations`, `ContrastiveAugmentationPipeline`
+  </Card>
+  <Card title="Evaluation" icon="magnifying-glass-chart" href="/evaluation/metrics">
+    `evaluate`, `label_scarcity_benchmark`, `analyze_datasets`
+  </Card>
+</CardGroup>

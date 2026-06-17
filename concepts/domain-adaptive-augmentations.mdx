@@ -1,0 +1,174 @@
+---
+title: "Domain-Adaptive Augmentations for ECG SSL"
+sidebarTitle: "Augmentations"
+description: "Seven physiologically grounded ECG augmentations that drive a +12.15% F1 improvement over supervised baselines by creating clinically meaningful training views."
+---
+
+Standard image-domain augmentations — random crops, color jitter, horizontal flips — are semantically arbitrary when applied to ECG waveforms. A horizontally flipped P-wave no longer represents a valid sinus beat; a color-shifted QRS complex conveys no physiological meaning. The SSRL-ECG augmentation pipeline is built around a different principle: every transformation must correspond to a real source of variation observed in clinical ECG recordings. This alignment between augmentation design and cardiac physiology is what enables the 7-technique pipeline to deliver a **+12.15% F1 improvement** (0.5750 → 0.6448) over a supervised CNN baseline trained on the same 10% label budget.
+
+## ECGAugmentations at a Glance
+
+The `ECGAugmentations` class is the single entry point for all augmentation logic. It accepts a raw ECG tensor and returns two independently augmented views suitable for contrastive or momentum-based SSL objectives.
+
+```python
+from ssrl_ecg.augmentations import ECGAugmentations
+import torch
+
+aug = ECGAugmentations(signal_length=5000, sampling_rate=500, prob_strong=0.8)
+
+x = torch.randn(4, 12, 5000)  # batch of 4, 12-lead ECG
+x1, x2 = aug(x)               # two augmented views
+
+print(x1.shape)  # torch.Size([4, 12, 5000])
+print(x2.shape)  # torch.Size([4, 12, 5000])
+```
+
+**Constructor parameters:**
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `signal_length` | `5000` | Samples per recording (500 Hz × 10 s = 5000) |
+| `sampling_rate` | `500` | Hz — used for frequency-domain calculations |
+| `prob_strong` | `0.8` | Probability gate for the entire strong-augmentation branch |
+
+The class transparently handles both single-sample `(channels, time)` and batch `(batch, channels, time)` inputs and returns output in the same format.
+
+---
+
+## Weak Augmentations (Always Applied)
+
+Weak augmentations are small, safe perturbations applied unconditionally to every sample before the strong branch runs. They model the irreducible measurement noise present in any real clinical recording.
+
+<CardGroup cols={3}>
+  <Card title="Gaussian Jitter" icon="waveform">
+    **Mechanism:** Additive white Gaussian noise with std=0.03 (≈3% of signal amplitude)
+    **Simulates:** Sensor electronics noise, EMI interference
+    **Application rate:** 90%
+  </Card>
+  <Card title="Amplitude Scaling" icon="arrows-up-down">
+    **Mechanism:** Uniform global scale factor drawn from `[1 − 0.15, 1 + 0.15]`
+    **Simulates:** Inter-session gain calibration differences
+    **Application rate:** 80%
+  </Card>
+  <Card title="Per-Channel Noise" icon="grip-lines">
+    **Mechanism:** Independent Gaussian noise per lead, level ∈ [0.5%, 2%] of that lead's std
+    **Simulates:** Varying contact quality across 12 electrode sites
+    **Application rate:** 60%
+  </Card>
+</CardGroup>
+
+<Tip>
+Weak augmentations are intentionally mild — they perturb the signal just enough to prevent the encoder from learning trivial identity shortcuts, without distorting clinically important waveform morphology like P-wave shape or ST-segment elevation.
+</Tip>
+
+---
+
+## Strong Augmentations (Probabilistic)
+
+The strong-augmentation branch fires with probability `prob_strong` (default 0.8). When active, all nine strong transforms are applied in sequence, each with its own internal application rate. This creates high augmentation diversity while leaving 20% of samples with only weak perturbations, preserving some easy positive pairs for training stability.
+
+### The 7 Domain-Specific Techniques
+
+| Augmentation | Mechanism | Physiological Simulation | Rate |
+|---|---|---|---|
+| **Frequency warping** | Non-linear time-index remapping via random control points (±5% jitter) | Natural heart rate variability (±5 bpm) across the recording | 50% |
+| **Medical mixup** | Convex combination `λx + (1−λ)x'`, λ ~ Beta(0.2, 0.2), with random within-batch partner | Averaged readings from patients with similar pathologies | 40% |
+| **Bandpass filtering** | FFT-domain mask with random `f_low ∈ [0.5, 1.5] Hz`, `f_high ∈ [40, 60] Hz` | Different recording devices with non-identical frequency responses | 30% |
+| **Segment CutMix** | Replace a 10–30% contiguous time window with the corresponding window from a random batch partner | Stitched recordings, electrode switching mid-session | 25% |
+| **Motion artifacts** | Sinusoidal baseline wander (0.01–0.05 mV amplitude @ 0.5–2 Hz) plus a high-frequency noise burst | Patient movement, loose electrode contact, respiratory artifact | 20% |
+| **Per-channel noise** | Independent Gaussian noise per lead with level drawn uniformly from [0.5%, 2%] of per-channel std | Differential contact resistance across 12 electrode sites | 60% |
+| **Temporal dropout** | Zero-out (fill with batch mean) a contiguous 5–20% segment; multiple segments possible | Signal interruptions, sensor dropouts, transmission loss | 30% |
+
+<Accordion title="Frequency Warping — Implementation Detail">
+  `_time_warp()` creates a smooth non-linear index mapping using randomly placed control points. The endpoint positions are fixed (no boundary artifacts), while interior waypoints are jittered by up to ±5% of the signal length. The mapping is computed via `np.interp`, then applied as an integer index gather — no learnable parameters are involved.
+
+  ```python
+  # Simplified logic from _time_warp()
+  old_indices = np.linspace(0, time - 1, num_control_points)
+  new_indices = old_indices.copy()
+  for i in range(1, len(new_indices) - 1):
+      jitter = np.random.randn() * (time * 0.05)
+      new_indices[i] = np.clip(new_indices[i] + jitter, ...)
+
+  full_mapping = np.interp(np.arange(time), old_indices, new_indices)
+  ```
+</Accordion>
+
+<Accordion title="Medical Mixup — Implementation Detail">
+  `_augment_mixup()` samples `λ` from a symmetric Beta(0.2, 0.2) distribution, which concentrates weight near 0 and 1 (most mixes are dominated by one sample). A random within-batch permutation selects the mixing partner. Unlike image mixup, ECG mixup is physiologically plausible: a blended waveform resembles a composite of overlapping cardiac conditions.
+
+  ```python
+  # Simplified logic from _augment_mixup()
+  lam = torch.distributions.Beta(alpha, alpha).sample().item()  # alpha=0.2
+  idx = torch.randperm(batch)
+  x_mixed = lam * x + (1 - lam) * x[idx]
+  ```
+</Accordion>
+
+<Accordion title="Motion Artifacts — Implementation Detail">
+  `_augment_motion_artifacts()` injects 1–3 artifact bursts per sample. Each burst combines a low-frequency sinusoidal baseline shift (modeling slow body movement or respiratory drift at 0.5–2 Hz) with an additive high-frequency noise burst (std=0.3, modeling rapid electrode motion). Amplitude is drawn from `Uniform(0.01, 0.05)` mV, matching realistic ambulatory ECG noise profiles.
+</Accordion>
+
+---
+
+## Additional Strong Transforms
+
+Beyond the 7 domain-specific techniques, the strong branch includes two general temporal transforms that further diversify the representation space:
+
+<CardGroup cols={2}>
+  <Card title="Time Shift" icon="arrow-right-arrow-left">
+    Circularly shifts the entire signal by up to ±10% of its length (zero-padded, not wrapped). Applied with 70% probability. Simulates recording start offset and rhythm phase variation.
+  </Card>
+  <Card title="Channel Shift" icon="table-columns">
+    Applies an independent random scale (±10%) and DC offset (±0.05) to each of the 12 leads separately. Applied with 60% probability. Simulates per-electrode impedance and placement variation.
+  </Card>
+</CardGroup>
+
+---
+
+## Weak vs. Strong: The Two-Tier Design
+
+The split between weak (always-on) and strong (gated) augmentations is a deliberate design choice with two benefits:
+
+<Tabs>
+  <Tab title="Training Stability">
+    Always applying at least the three weak transforms ensures that every positive pair has *some* meaningful difference to resolve. Pure identical pairs would produce zero contrastive gradient. At the same time, leaving 20% of iterations without strong augmentation provides easier positive pairs that stabilize early training when the encoder representations are still noisy.
+  </Tab>
+  <Tab title="Augmentation Diversity">
+    The 9-transform strong branch (7 domain-specific + time shift + channel shift) can generate an astronomically large variety of views when composed together. With `prob_strong=0.8` and each strong transform having its own 20–70% internal gate, the expected number of active transforms per view varies from 2 to 9 — providing a curriculum-like diversity spectrum.
+  </Tab>
+</Tabs>
+
+### Full Pipeline Execution Order
+
+```text
+Input x [batch, 12, 5000]
+    │
+    ├── _weak_jitter()           # always, 90% per sample
+    ├── _weak_scaling()          # always, 80% per sample
+    ├── _augment_channel_noise() # always, 60% per sample
+    │
+    └── [if rand() < 0.8] ──────────────────────────────────────┐
+            ├── _time_warp()                    # 50%            │
+            ├── _augment_time_shift()           # 70%            │
+            ├── _augment_dropout()              # 50%            │
+            ├── _augment_bandpass_variation()   # 50%            │
+            ├── _augment_segment_cropping()     # 50%            │
+            ├── _augment_mixup()                # 40%            │
+            ├── _augment_cutmix()               # 30%            │
+            ├── _augment_motion_artifacts()     # 50%            │
+            └── _augment_channel_shift()        # 60%            │
+                                                ─────────────────┘
+    │
+    └── clamp(x, -10, 10)       # safety guard against divergence
+
+Output x1, x2  [batch, 12, 5000]
+```
+
+<Tip>
+The full domain-adaptive pipeline delivers a **+12.15% F1 improvement** over a supervised CNN baseline (F1: 0.5750 → 0.6448) when used for SimCLR pretraining on 10% labeled PTB-XL data. Ablation studies confirm that removing any single domain-specific augmentation degrades AUROC, with frequency warping and motion artifact simulation being the most impactful individual contributors.
+</Tip>
+
+<Warning>
+Output values are clamped to `[−10, 10]` after the augmentation pipeline to prevent numerical overflow when multiple strong transforms are composed. If you extend the pipeline with custom augmentations, ensure your transforms do not systematically amplify signal amplitude beyond this range.
+</Warning>

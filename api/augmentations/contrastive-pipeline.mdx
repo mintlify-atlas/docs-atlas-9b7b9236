@@ -1,0 +1,156 @@
+---
+title: "ContrastiveAugmentationPipeline for SSL View Pairs"
+sidebarTitle: "Contrastive Pipeline"
+description: "Reference for ContrastiveAugmentationPipeline, a thin wrapper around ECGAugmentations that exposes a clean interface for generating SSL view pairs in DataLoaders."
+---
+
+`ContrastiveAugmentationPipeline` is a lightweight wrapper around [`ECGAugmentations`](/api/augmentations/ecg-augmentations) that provides a clean, named entry-point for contrastive self-supervised learning pipelines. It accepts the same constructor arguments and produces the same `(view1, view2)` output, but signals intent clearly in training code — making it the preferred class to reference in dataset classes and training loops.
+
+## Class Overview
+
+```python
+from ssrl_ecg.augmentations import ContrastiveAugmentationPipeline
+```
+
+Internally, `ContrastiveAugmentationPipeline.__init__` instantiates an `ECGAugmentations` object and delegates every `__call__` invocation directly to it. There is no additional logic, state, or configuration beyond what `ECGAugmentations` already provides.
+
+## Constructor
+
+```python
+ContrastiveAugmentationPipeline(signal_length=5000, sampling_rate=500, prob_strong=0.8)
+```
+
+<ParamField path="signal_length" type="int" default="5000">
+  Number of time-steps in the ECG signal. Should match the temporal dimension of your dataset tensors. PTB-XL at 500 Hz for 10 seconds gives `5000`.
+</ParamField>
+
+<ParamField path="sampling_rate" type="int" default="500">
+  Sampling rate in Hz. Passed directly to the underlying `ECGAugmentations` instance and used by frequency-domain transforms. Use `100` for the low-resolution PTB-XL variant.
+</ParamField>
+
+<ParamField path="prob_strong" type="float" default="0.8">
+  Probability that the strong augmentation block fires on any given call. Forwarded unchanged to `ECGAugmentations`. Higher values increase view diversity and are recommended for full pretraining runs.
+</ParamField>
+
+## `__call__`
+
+```python
+view1, view2 = pipeline(x)
+```
+
+Delegates to `ECGAugmentations.__call__` and returns two independently augmented views of the input signal.
+
+<ParamField path="x" type="torch.Tensor" required>
+  Input ECG signal tensor. Accepts both:
+  - `[channels, time]` — single sample, as returned by a dataset `__getitem__`
+  - `[batch, channels, time]` — collated mini-batch
+</ParamField>
+
+**Returns**
+
+<ResponseField name="view1" type="torch.Tensor">
+  First augmented view. Shape matches the input exactly. Values clamped to `[-10, 10]`.
+</ResponseField>
+
+<ResponseField name="view2" type="torch.Tensor">
+  Second augmented view, produced by an independent stochastic pass through the augmentation pipeline.
+</ResponseField>
+
+<Note>
+  All augmentation behaviour — including individual method probabilities, the weak/strong split, and output clamping — is governed entirely by the underlying `ECGAugmentations` instance. See the [ECGAugmentations reference](/api/augmentations/ecg-augmentations) for a full breakdown of every transform, its application probability, and what cardiac artefact it simulates.
+</Note>
+
+## DataLoader Integration
+
+The most common use of `ContrastiveAugmentationPipeline` is inside a PyTorch `Dataset.__getitem__`, where a single ECG sample is augmented on the fly during data loading. The two views are then stacked and passed to the contrastive loss function.
+
+<Steps>
+  <Step title="Instantiate the pipeline once">
+    Create the pipeline at dataset construction time and store it as an instance attribute. This avoids re-allocating the underlying `ECGAugmentations` object on every worker iteration.
+
+    ```python
+    from ssrl_ecg.augmentations import ContrastiveAugmentationPipeline
+
+    pipeline = ContrastiveAugmentationPipeline(
+        signal_length=5000,
+        sampling_rate=500,
+        prob_strong=0.8,
+    )
+    ```
+  </Step>
+
+  <Step title="Generate view pairs in __getitem__">
+    Call the pipeline on a single `[channels, time]` tensor inside `__getitem__`. Both views are returned as a tuple and can be stacked for the contrastive loss.
+
+    ```python
+    class ECGContrastiveDataset(torch.utils.data.Dataset):
+        def __init__(self, signals, signal_length=5000, sampling_rate=500):
+            self.signals = signals  # list or array of [channels, time] tensors
+            self.pipeline = ContrastiveAugmentationPipeline(
+                signal_length=signal_length,
+                sampling_rate=sampling_rate,
+                prob_strong=0.8,
+            )
+
+        def __len__(self):
+            return len(self.signals)
+
+        def __getitem__(self, idx):
+            x = self.signals[idx]          # [channels, time]
+            x1, x2 = self.pipeline(x)      # each: [channels, time]
+            return x1, x2
+    ```
+  </Step>
+
+  <Step title="Wrap in a DataLoader">
+    Pass the dataset to a standard `DataLoader`. Multiple workers are safe because the pipeline contains no shared mutable state.
+
+    ```python
+    dataset = ECGContrastiveDataset(signals)
+    loader  = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=64,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+    )
+
+    for x1_batch, x2_batch in loader:
+        # x1_batch: [64, channels, time]
+        # x2_batch: [64, channels, time]
+        loss = contrastive_loss(encoder(x1_batch), encoder(x2_batch))
+        ...
+    ```
+  </Step>
+</Steps>
+
+## Minimal Usage Example
+
+```python
+from ssrl_ecg.augmentations import ContrastiveAugmentationPipeline
+import torch
+
+pipeline = ContrastiveAugmentationPipeline(signal_length=5000, prob_strong=0.8)
+
+# Single sample from a dataset __getitem__
+x = torch.randn(12, 5000)          # [channels, time]
+x1, x2 = pipeline(x)
+print(x1.shape)                    # torch.Size([12, 5000])
+print(torch.allclose(x1, x2))     # False — independent stochastic views
+
+# Works equally on a collated batch
+x_batch = torch.randn(32, 12, 5000)
+x1, x2 = pipeline(x_batch)
+print(x1.shape)                    # torch.Size([32, 12, 5000])
+```
+
+## Relationship to ECGAugmentations
+
+<CardGroup cols={2}>
+  <Card title="ECGAugmentations" icon="gear" href="/api/augmentations/ecg-augmentations">
+    The full augmentation engine. Use directly when you need access to internal augmentation methods, want to subclass and override individual transforms, or are building a custom multi-view pipeline beyond the standard two-view setup.
+  </Card>
+  <Card title="ContrastiveAugmentationPipeline" icon="arrows-split-up-and-left">
+    The recommended entry-point for standard SimCLR / BYOL / MoCo-style pretraining. Identical behaviour to `ECGAugmentations.__call__`, but clearly communicates intent in training code and dataset classes.
+  </Card>
+</CardGroup>

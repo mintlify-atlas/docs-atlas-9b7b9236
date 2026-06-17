@@ -1,0 +1,218 @@
+---
+title: "ResNet1D: 1D Residual Network for ECG Classification"
+sidebarTitle: "ResNet1D"
+description: "ResNet1D and ResidualBlock1D — a 1D residual network baseline for supervised ECG classification on multi-lead signals."
+---
+
+`ResNet1D` is a fully-supervised baseline model for ECG classification that adapts the standard ResNet architecture to one-dimensional cardiac signals. It provides a strong non-SSL baseline against which SimCLR and BYOL pretraining can be compared. Both `ResNet1D` and its building block `ResidualBlock1D` live in `ssrl_ecg.models.resnet1d`.
+
+---
+
+## ResidualBlock1D
+
+`ResidualBlock1D` is the core residual unit. It applies two sequential 1D convolutions (each followed by batch normalization) and adds a skip connection from the input. When the spatial resolution or channel count changes (`stride > 1` or `in_channels != out_channels`), a learnable `downsample` projection is applied to the identity branch.
+
+```
+x ──→ Conv1d(stride) → BN → ReLU → Conv1d → BN ──→ (+) → ReLU
+└─────────────────── (downsample if needed) ──────────────┘
+```
+
+### Constructor Parameters
+
+<ParamField path="in_channels" type="int" required>
+  Number of input channels.
+</ParamField>
+
+<ParamField path="out_channels" type="int" required>
+  Number of output channels.
+</ParamField>
+
+<ParamField path="kernel_size" type="int" default="7">
+  Width of both 1D convolutional kernels within the block. Padding is set to
+  `kernel_size // 2` so temporal length is preserved (given `stride=1`).
+</ParamField>
+
+<ParamField path="stride" type="int" default="1">
+  Stride applied to the first convolution. A stride of 2 halves temporal resolution.
+</ParamField>
+
+<ParamField path="downsample" type="nn.Module | None" default="None">
+  Optional projection applied to the identity (skip) branch when channel count
+  or temporal resolution changes. Typically a `Conv1d(1×1) + BN` created by
+  `ResNet1D._make_layer`. Pass `None` when dimensions match.
+</ParamField>
+
+### Forward
+
+```python
+def forward(x: Tensor) -> Tensor
+```
+
+<ParamField path="x" type="Tensor" required>
+  Input feature map of shape `[batch, in_channels, time]`.
+</ParamField>
+
+<ResponseField name="output" type="Tensor">
+  Output feature map of shape `[batch, out_channels, ceil(time/stride)]`.
+</ResponseField>
+
+---
+
+## ResNet1D
+
+`ResNet1D` assembles four residual layers — each containing two or three `ResidualBlock1D` units — preceded by a stem convolution and max-pooling layer. A global average pool and a linear classification head map the final feature map to class logits.
+
+### Architecture
+
+The network follows the channel schedule `[width, width×2, width×4, width×8]` across the four stages. At the default `width=64`, the feature dimensions progress as:
+
+```
+Input [B, 12, T]
+  │
+  ▼  Conv1d(15, s=1) → BN → ReLU → MaxPool(3, s=2)
+  ▼  Layer 1: 2 × ResidualBlock1D(64  → 64,   k=7, s=1)
+  ▼  Layer 2: 2 × ResidualBlock1D(64  → 128,  k=7, s=2)
+  ▼  Layer 3: 2 × ResidualBlock1D(128 → 256,  k=7, s=2)
+  ▼  Layer 4: 2 × ResidualBlock1D(256 → 512,  k=7, s=2)
+  ▼  AdaptiveAvgPool1d(1) → Dropout(0.2) → Linear(512, num_classes)
+  │
+Output [B, num_classes]
+```
+
+### Depth vs. Blocks per Layer
+
+The `depth` parameter mirrors the ResNet naming convention from the original paper. All residual layers in the current implementation use 2 blocks regardless of depth setting; the depth argument is reserved for future extension to deeper variants.
+
+| Depth | Blocks per layer | Total residual layers |
+|-------|------------------|-----------------------|
+| 18    | 2                | 4 (8 blocks total)    |
+| 34    | 3                | 4 (12 blocks total)   |
+
+<Note>
+  In the current source, `_make_layer` is always called with `blocks=2`. The `depth`
+  parameter is stored as an attribute but does not yet change block counts. A future
+  release will wire depth 34 to 3 blocks per layer.
+</Note>
+
+### Constructor Parameters
+
+<ParamField path="in_channels" type="int" default="12">
+  Number of input ECG leads.
+</ParamField>
+
+<ParamField path="num_classes" type="int" default="5">
+  Number of output classes. For the PTB-XL five-class rhythm task, use the default `5`.
+</ParamField>
+
+<ParamField path="width" type="int" default="64">
+  Base channel width. The four residual stages use `[width, width×2, width×4, width×8]`
+  channels respectively. The final linear layer has `width×8` input features (512 by default).
+</ParamField>
+
+<ParamField path="depth" type="int" default="18">
+  ResNet depth variant. Accepted values: `18` or `34`. See the depth table above.
+</ParamField>
+
+### Attributes
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `conv1` | `nn.Conv1d` | Stem convolution (kernel 15, stride 1). |
+| `bn1` | `nn.BatchNorm1d` | Batch norm after stem conv. |
+| `maxpool` | `nn.MaxPool1d` | Max pool (kernel 3, stride 2). |
+| `layer1–4` | `nn.Sequential` | Four residual stages. |
+| `adaptive_pool` | `nn.AdaptiveAvgPool1d` | Global average pool to length 1. |
+| `dropout` | `nn.Dropout` | 20 % dropout before classifier. |
+| `fc` | `nn.Linear` | Classification head. |
+
+### Forward
+
+```python
+def forward(x: Tensor) -> Tensor
+```
+
+<ParamField path="x" type="Tensor" required>
+  ECG tensor of shape `[batch, in_channels, time]`.
+</ParamField>
+
+<ResponseField name="logits" type="Tensor">
+  Un-activated class scores of shape `[batch, num_classes]`. Apply `torch.sigmoid`
+  for multi-label probabilities or `torch.softmax` for single-label classification.
+</ResponseField>
+
+---
+
+## Example Usage
+
+```python
+import torch
+from ssrl_ecg.models.resnet1d import ResNet1D, ResidualBlock1D
+
+# ── Build and inspect the model ───────────────────────────────────────────────
+model = ResNet1D(in_channels=12, num_classes=5, width=64, depth=18)
+print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+# ── Forward pass ──────────────────────────────────────────────────────────────
+x   = torch.randn(4, 12, 1000)
+out = model(x)
+print(f"Input:  {x.shape}")    # torch.Size([4, 12, 1000])
+print(f"Output: {out.shape}")  # torch.Size([4, 5])
+
+# ── Supervised training step ──────────────────────────────────────────────────
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+labels    = torch.zeros(4, 5)   # multi-label binary targets
+
+logits = model(x)
+loss   = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels)
+loss.backward()
+optimizer.step()
+
+# ── Standalone ResidualBlock1D ────────────────────────────────────────────────
+import torch.nn as nn
+
+downsample = nn.Sequential(
+    nn.Conv1d(64, 128, kernel_size=1, stride=2, bias=False),
+    nn.BatchNorm1d(128),
+)
+block = ResidualBlock1D(in_channels=64, out_channels=128,
+                        kernel_size=7, stride=2, downsample=downsample)
+feat_in  = torch.randn(8, 64, 500)
+feat_out = block(feat_in)
+print(feat_out.shape)   # torch.Size([8, 128, 250])
+```
+
+---
+
+## Using ResNet1D as an Encoder Backbone
+
+`ResNet1D` is designed as a supervised classifier, but its intermediate feature maps can be extracted for use as a backbone:
+
+```python
+import torch
+import torch.nn as nn
+from ssrl_ecg.models.resnet1d import ResNet1D
+
+class ResNet1DEncoder(nn.Module):
+    """ResNet1D with the classification head removed for use as an encoder."""
+
+    def __init__(self, in_channels=12, width=64, depth=18):
+        super().__init__()
+        base = ResNet1D(in_channels=in_channels, num_classes=1,
+                        width=width, depth=depth)
+        # Keep everything except the final classifier
+        self.backbone   = nn.Sequential(
+            base.conv1, base.bn1, base.relu, base.maxpool,
+            base.layer1, base.layer2, base.layer3, base.layer4,
+        )
+        self.pool        = base.adaptive_pool
+        self.out_channels = width * 8  # 512 at default width=64
+
+    def forward(self, x):
+        x = self.backbone(x)
+        return self.pool(x).squeeze(-1)   # [batch, out_channels]
+
+encoder = ResNet1DEncoder(in_channels=12, width=64)
+x       = torch.randn(4, 12, 1000)
+feats   = encoder(x)
+print(feats.shape)   # torch.Size([4, 512])
+```

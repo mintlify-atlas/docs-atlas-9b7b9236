@@ -1,0 +1,259 @@
+---
+title: "Reproducing SSRL-ECG Experiments with Statistical Rigor"
+sidebarTitle: "Reproducibility"
+description: "Learn how to seed, checkpoint, and statistically validate SSRL-ECG experiments so your results match the published SimCLR AUROC of 0.8717 ± 0.0032."
+---
+
+Reproducing deep learning results for medical signal processing requires deliberate control over every source of randomness. SSRL-ECG provides first-class tooling for this: a unified `set_seed()` helper, a canonical list of ten evaluation seeds, confidence-interval computation from multi-seed runs, and statistical significance scripts — all of which together let you replicate the published SimCLR AUROC of **0.8717 ± 0.0032** down to the fourth decimal place.
+
+## Seeding Strategy
+
+All randomness in the pipeline flows through a single function, `set_seed`, defined in `ssrl_ecg/utils.py`. Calling it once before any data loading or model initialization ensures that Python's built-in RNG, NumPy, PyTorch (CPU and all CUDA devices) are all synchronised to the same state.
+
+```python
+from ssrl_ecg.utils import set_seed
+
+set_seed(42)
+```
+
+The function sets four independent random number generators:
+
+| RNG | Call |
+|-----|------|
+| Python stdlib | `random.seed(seed)` |
+| NumPy | `np.random.seed(seed)` |
+| PyTorch CPU | `torch.manual_seed(seed)` |
+| PyTorch CUDA (all GPUs) | `torch.cuda.manual_seed_all(seed)` |
+
+<Note>
+  Even with `set_seed()` called, SSRL-ECG configures cuDNN with
+  `torch.backends.cudnn.benchmark = True` and
+  `torch.backends.cudnn.deterministic = False` inside `choose_device()`.
+  The benchmark mode selects the fastest convolution algorithm for your
+  hardware, which may vary between runs, so results can differ at the last
+  decimal place across machines or GPU generations. To achieve
+  fully bit-for-bit reproducibility, set both flags yourself after calling
+  `choose_device()`:
+
+  ```python
+  import torch
+  torch.backends.cudnn.benchmark = False
+  torch.backends.cudnn.deterministic = True
+  ```
+
+  Expect a moderate throughput reduction (~10–20 %) when deterministic mode
+  is enabled.
+</Note>
+
+## Multi-Seed Validation
+
+A single-seed result can be misleading due to lucky or unlucky weight initialisation. SSRL-ECG validates all published numbers across **ten fixed seeds** to produce stable confidence intervals.
+
+<Tip>
+  Use exactly these ten seed values to reproduce numbers that match the paper:
+  `42, 52, 62, 72, 82, 92, 102, 112, 122, 132`. Choosing different seeds will
+  yield statistically equivalent results but will not reproduce the exact
+  mean and CI values reported.
+</Tip>
+
+### Running the Multi-Seed SimCLR Experiment
+
+<Tabs>
+  <Tab title="Linux / macOS">
+    ```bash
+    python scripts/run_multiseed_training.py \
+      --model simclr \
+      --seeds 42 52 62 72 82 92 102 112 122 132 \
+      --label-fraction 0.1
+    ```
+  </Tab>
+  <Tab title="Windows (PowerShell)">
+    ```powershell
+    python scripts/run_multiseed_training.py `
+      --model simclr `
+      --seeds 42 52 62 72 82 92 102 112 122 132 `
+      --label-fraction 0.1
+    ```
+  </Tab>
+</Tabs>
+
+The script calls `set_seed(seed)` at the top of every training run, saves a per-seed checkpoint, and writes aggregate statistics to `results/phase2_multiseed_results.json`.
+
+### Published Multi-Seed Results
+
+| Metric | Mean ± Std | 95 % CI |
+|--------|-----------|---------|
+| AUROC (macro) | 0.8717 ± 0.0032 | 0.8671 – 0.8763 |
+| F1 (macro) | 0.6448 ± 0.0181 | — |
+
+The 95 % confidence interval is computed from the empirical 2.5th and 97.5th percentiles across the ten seeds:
+
+```python
+import numpy as np
+
+aurocs = [0.8717, ...]  # one value per seed
+ci_lower = np.percentile(aurocs, 2.5)
+ci_upper = np.percentile(aurocs, 97.5)
+print(f"95% CI: {ci_lower:.4f} – {ci_upper:.4f}")
+```
+
+## Checkpoint Saving and Loading
+
+<Steps>
+  <Step title="SSL Pretraining — saves `encoder` key">
+    The SimCLR and BYOL pretraining scripts save only the encoder weights so
+    that the projection head (used exclusively during contrastive training) is
+    not bundled with the checkpoint:
+
+    ```python
+    torch.save({"encoder": encoder.state_dict()}, "checkpoints/ssl_simclr_enhanced.pt")
+    ```
+
+    To reload for fine-tuning:
+
+    ```python
+    ckpt = torch.load("checkpoints/ssl_simclr_enhanced.pt", map_location="cpu")
+    encoder.load_state_dict(ckpt["encoder"])
+    ```
+  </Step>
+
+  <Step title="Supervised / Fine-tune — saves `model` key">
+    The supervised baseline and the linear-probing fine-tune scripts save the
+    full `ECGClassifier` state under the `model` key:
+
+    ```python
+    torch.save({"model": classifier.state_dict()}, "checkpoints/supervised_focal_oversample.pt")
+    ```
+
+    To reload for evaluation:
+
+    ```python
+    ckpt = torch.load("checkpoints/supervised_focal_oversample.pt", map_location="cpu")
+    classifier.load_state_dict(ckpt["model"])
+    ```
+  </Step>
+
+  <Step title="Multi-seed supervised checkpoints">
+    `scripts/train_supervised_multiseed.py` follows the same `model` convention
+    and writes one file per seed:
+
+    ```
+    checkpoints/multiseed_focal_oversample_seed042.pt
+    checkpoints/multiseed_focal_oversample_seed052.pt
+    ...
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Mixing up the `encoder` and `model` keys is the most common checkpoint
+  loading error. SSL checkpoints use `encoder`; classifier checkpoints use
+  `model`. See the Troubleshooting guide if you encounter
+  `RuntimeError: Error(s) in loading state_dict`.
+</Warning>
+
+## Statistical Significance Testing
+
+After collecting multi-seed results, use `scripts/statistical_tests.py` to compare methods and compute effect sizes.
+
+```bash
+python scripts/statistical_tests.py \
+  --results-dir results/ \
+  --baseline supervised \
+  --alpha 0.05 \
+  --output-dir analysis/statistical_tests
+```
+
+The `StatisticalTester` class automatically:
+
+1. Runs a **Shapiro-Wilk normality test** on each group of scores.
+2. Selects a **paired t-test** when both groups are normally distributed, or a **Mann-Whitney U test** otherwise.
+3. Computes **Cohen's d** effect size (or rank-biserial correlation for the non-parametric path).
+4. Saves a formatted report and a significance-comparison plot to `--output-dir`.
+
+<CardGroup cols={2}>
+  <Card title="Paired t-test" icon="chart-line">
+    Used when both distributions pass Shapiro-Wilk (p > α). Reports t-statistic, p-value, Cohen's d, and the mean difference with 95 % CI.
+  </Card>
+  <Card title="Mann-Whitney U" icon="shuffle">
+    Used as the non-parametric fallback. Reports U-statistic, p-value, rank-biserial r, and median difference.
+  </Card>
+</CardGroup>
+
+## Ablation Experiments
+
+### Retrain with Enhanced Augmentations
+
+`scripts/retrain_with_enhanced_augmentations.py` orchestrates a four-step pipeline — BYOL pretraining, SimCLR pretraining, BYOL fine-tune, SimCLR fine-tune — in a single invocation:
+
+```bash
+python scripts/retrain_with_enhanced_augmentations.py
+```
+
+The script prints elapsed time after every step and halts with a non-zero exit code if any step fails, preventing silent partial runs from being interpreted as complete results.
+
+### Analyse Retraining Strategy
+
+`scripts/analyze_retraining_strategy.py` compares epoch counts and augmentation sets without running full training. It prints the recommended command for each experiment and writes a structured `results/retraining_recommendations.json`:
+
+```bash
+python scripts/analyze_retraining_strategy.py --experiment all
+```
+
+<Tabs>
+  <Tab title="BYOL only">
+    ```bash
+    python scripts/analyze_retraining_strategy.py --experiment byol
+    ```
+  </Tab>
+  <Tab title="Supervised only">
+    ```bash
+    python scripts/analyze_retraining_strategy.py --experiment supervised
+    ```
+  </Tab>
+  <Tab title="All experiments">
+    ```bash
+    python scripts/analyze_retraining_strategy.py --experiment all
+    ```
+  </Tab>
+</Tabs>
+
+<Accordion title="What does retraining_recommendations.json contain?">
+  The file has three top-level keys:
+
+  - **`epochs_recommendation`** — per-model advice (e.g., increase BYOL from 20 to 30 epochs, reduce supervised from 30 to 20 to avoid overfitting).
+  - **`augmentation_recommendation`** — lists the basic augmentations to replace and the domain-adaptive augmentations to add, with an expected +2–5 % AUROC improvement.
+  - **`experiments_to_run`** — an array of objects, each with `name`, `command`, `checkpoint` path, and `expected_improvement`.
+</Accordion>
+
+## End-to-End Reproducibility Checklist
+
+<Steps>
+  <Step title="Install the package in editable mode">
+    ```bash
+    pip install -e .
+    ```
+  </Step>
+  <Step title="Verify CUDA and device setup">
+    ```bash
+    python -c "import torch; print(torch.cuda.is_available())"
+    ```
+  </Step>
+  <Step title="Call set_seed() before any training code">
+    ```python
+    from ssrl_ecg.utils import set_seed
+    set_seed(42)
+    ```
+  </Step>
+  <Step title="Run the multi-seed SimCLR pipeline">
+    Use all ten canonical seeds: `42 52 62 72 82 92 102 112 122 132`.
+  </Step>
+  <Step title="Run statistical tests on collected results">
+    ```bash
+    python scripts/statistical_tests.py --results-dir results/ --baseline supervised
+    ```
+  </Step>
+  <Step title="Compare against published CI: 0.8671–0.8763 AUROC">
+    If your CI overlaps this range, your reproduction is statistically consistent with the paper.
+  </Step>
+</Steps>

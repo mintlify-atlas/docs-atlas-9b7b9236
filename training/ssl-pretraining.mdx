@@ -1,0 +1,261 @@
+---
+title: "Self-Supervised ECG Pretraining with SimCLR and BYOL"
+sidebarTitle: "SSL Pretraining"
+description: "Pretrain a 1D-CNN encoder on unlabeled PTB-XL ECGs using SimCLR or BYOL. Achieve AUROC 0.8717 before fine-tuning on just 10% of labels."
+---
+
+Self-supervised pretraining lets you extract rich ECG representations from the full unlabeled training set before ever touching a diagnostic label. SSRL-ECG supports two complementary SSL frameworks — SimCLR and BYOL — both built on the same `ECGEncoder1DCNN` backbone and the same suite of seven domain-adaptive augmentations. The resulting encoder checkpoint is a drop-in input for the fine-tuning pipeline.
+
+## Architecture Overview
+
+Both frameworks share the same encoder backbone. The encoder is `ECGEncoder1DCNN` with `in_ch=12` (12-lead ECG) and `width=64` (three stacked Conv1D blocks expanding to a 256-dimensional latent). The two frameworks differ only in their objective and projection heads:
+
+<CardGroup cols={2}>
+  <Card title="SimCLR" icon="arrows-left-right">
+    Contrastive learning with NT-Xent loss. Projects to a 128-dim space and maximizes agreement between two augmented views of the same ECG. Best performing: **AUROC 0.8717**.
+  </Card>
+  <Card title="BYOL" icon="rotate">
+    Momentum-based learning with online/target network pair. No negative pairs required. Projects to a 256-dim space. Alternative with **AUROC 0.8565**.
+  </Card>
+</CardGroup>
+
+<Note>
+  Both checkpoints save only the encoder state dict under the `"encoder"` key:
+  `torch.save({"encoder": model.encoder.state_dict()}, out_path)`. The projection heads are discarded after pretraining.
+</Note>
+
+---
+
+## Domain-Adaptive Augmentations
+
+Seven augmentations are applied stochastically during pretraining to create physiologically plausible views of each ECG:
+
+| Augmentation | Mechanism | Application Rate |
+|---|---|---|
+| Frequency warping | ±5% heart rate variation | 50% |
+| Medical mixup | ECG-aware Beta blending | 40% |
+| Bandpass filtering | f_low ∈ [0.5, 1.5] Hz, f_high ∈ [40, 60] Hz | 30% |
+| Segment CutMix | 10–30% temporal masking | 25% |
+| Motion artifacts | Baseline wander 0.01–0.05 mV @ 0.5–2 Hz | 20% |
+| Per-channel noise | 0.5–2% per-channel std | 60% |
+| Temporal dropout | 5–20% masking + interpolation | 30% |
+
+Together these augmentations contribute a **+12.15% F1 improvement** over a supervised CNN trained without them.
+
+---
+
+## Training
+
+<Tabs>
+  <Tab title="SimCLR">
+    SimCLR uses the NT-Xent (normalized temperature-scaled cross-entropy) contrastive loss. Two augmented views of each ECG are produced by `SimCLRAugmentations`, passed through the shared encoder and a two-layer MLP projector, then compared. The Adam optimizer trains both encoder and projector jointly.
+
+    **Recommended command:**
+
+    ```bash
+    python -m ssrl_ecg.train_ssl_simclr \
+      --data-root data/PTB-XL \
+      --epochs 20 \
+      --batch-size 256 \
+      --lr 1e-3 \
+      --temperature 0.07 \
+      --projection-dim 128 \
+      --signal-length 1000 \
+      --seed 42 \
+      --out checkpoints/ssl_simclr.pt
+    ```
+
+    ### CLI Arguments
+
+    <ParamField path="--data-root" type="Path" default="data/PTB-XL">
+      Root directory of the PTB-XL dataset. Must contain `ptbxl_database.csv`, `scp_statements.csv`, and a `records100/` folder.
+    </ParamField>
+
+    <ParamField path="--epochs" type="int" default="20">
+      Number of full passes over the unlabeled training split (PTB-XL folds 1–8, 17,489 samples).
+    </ParamField>
+
+    <ParamField path="--batch-size" type="int" default="256">
+      Number of ECG pairs per optimization step. Larger batches provide more negatives for NT-Xent and generally improve SimCLR performance. Reduce to `64` if you encounter CUDA out-of-memory errors.
+    </ParamField>
+
+    <ParamField path="--lr" type="float" default="1e-3">
+      Learning rate for the Adam optimizer applied to both the encoder and projection head.
+    </ParamField>
+
+    <ParamField path="--temperature" type="float" default="0.07">
+      Temperature parameter τ in the NT-Xent loss. Lower values produce sharper distributions and stronger push on negatives. The default `0.07` matches the original SimCLR paper recommendation.
+    </ParamField>
+
+    <ParamField path="--projection-dim" type="int" default="128">
+      Output dimensionality of the two-layer MLP projection head. The encoder produces a 256-dim latent; this head maps it down to 128 dims for the contrastive objective.
+    </ParamField>
+
+    <ParamField path="--signal-length" type="int" default="1000">
+      Number of time steps to load per ECG record. At 100 Hz this corresponds to 10 seconds, matching the full PTB-XL recording length.
+    </ParamField>
+
+    <ParamField path="--seed" type="int" default="42">
+      Global random seed passed to `set_seed()` for reproducible data loading, weight initialization, and augmentation sampling.
+    </ParamField>
+
+    <ParamField path="--out" type="Path" default="checkpoints/ssl_simclr.pt">
+      Destination path for the saved encoder checkpoint. Parent directories are created automatically. The file stores `{"encoder": <state_dict>}`.
+    </ParamField>
+
+    ### Results
+
+    | Metric | Value |
+    |---|---|
+    | AUROC (after fine-tuning on 10% labels) | **0.8717** |
+    | F1 Macro (after fine-tuning) | **0.6448** |
+    | AUROC multi-seed (10 seeds) | **0.8717 ± 0.0032** |
+    | 95% CI | 0.8671 – 0.8763 |
+  </Tab>
+
+  <Tab title="BYOL">
+    BYOL (Bootstrap Your Own Latent) maintains an online network and an exponential moving average (EMA) target network. The online predictor is trained to match the target projector's representation — no negative samples are needed. The target network is updated each step with `tau = 0.999`.
+
+    **Recommended command:**
+
+    ```bash
+    python -m ssrl_ecg.train_ssl_byol \
+      --data-root data/PTB-XL \
+      --epochs 30 \
+      --batch-size 256 \
+      --momentum-tau 0.99 \
+      --seed 42 \
+      --out checkpoints/ssl_byol.pt
+    ```
+
+    ### CLI Arguments
+
+    <ParamField path="--data-root" type="Path" default="data/PTB-XL">
+      Root directory of the PTB-XL dataset. Must contain `ptbxl_database.csv`, `scp_statements.csv`, and a `records100/` folder.
+    </ParamField>
+
+    <ParamField path="--epochs" type="int" default="30">
+      Number of full passes over the unlabeled training split. BYOL typically benefits from a longer pretraining schedule than SimCLR, hence the higher default.
+    </ParamField>
+
+    <ParamField path="--batch-size" type="int" default="256">
+      Samples per training step. Because BYOL does not rely on in-batch negatives, smaller batches are more tolerable than in SimCLR.
+    </ParamField>
+
+    <ParamField path="--momentum-tau" type="float" default="0.99">
+      EMA decay coefficient τ used when updating the target encoder and projector:
+      `target = τ × target + (1 − τ) × online`. Higher values make the target update more slowly.
+    </ParamField>
+
+    <ParamField path="--seed" type="int" default="42">
+      Global random seed for reproducibility.
+    </ParamField>
+
+    <ParamField path="--out" type="Path" default="checkpoints/ssl_byol.pt">
+      Destination path for the saved encoder checkpoint. The file stores `{"encoder": <state_dict>}` (online encoder weights only).
+    </ParamField>
+
+    <Note>
+      The BYOL script also accepts `--lr` (default `1e-3`) and `--signal-length` (default `1000`) as arguments, matching the shared data-loading infrastructure.
+    </Note>
+
+    ### Architecture Details
+
+    BYOL uses a two-branch design built on top of `ECGEncoder1DCNN(in_ch=12, width=64)`:
+
+    - **Online network**: encoder → `BYOLProjector(hidden=2048, out=256)` → `BYOLPredictor(hidden=2048, out=256)`
+    - **Target network**: EMA copy of encoder → `BYOLProjector(hidden=2048, out=256)` — frozen, no gradients
+    - **Loss**: symmetric L2 distance between normalized online predictions and target projections
+
+    ### Results
+
+    | Metric | Value |
+    |---|---|
+    | AUROC (after fine-tuning on 10% labels) | **0.8565** |
+    | F1 Macro (after fine-tuning) | **0.6301** |
+  </Tab>
+</Tabs>
+
+---
+
+## Checkpoint Format
+
+Both pretraining scripts write a single `.pt` file containing only the encoder weights. The projection heads and (for BYOL) the target network are not saved.
+
+```python
+# Written by both train_ssl_simclr.py and train_ssl_byol.py
+torch.save({"encoder": model.encoder.state_dict()}, args.out)
+```
+
+To inspect a checkpoint:
+
+```python
+import torch
+
+ckpt = torch.load("checkpoints/ssl_simclr.pt", map_location="cpu")
+print(ckpt.keys())          # dict_keys(['encoder'])
+print(type(ckpt["encoder"])) # <class 'collections.OrderedDict'>
+```
+
+---
+
+## Ablation: Augmentation Contributions
+
+You can evaluate the contribution of individual augmentations via the `--config` flag. Use these commands to measure how much each augmentation contributes to downstream performance:
+
+```bash
+# Full augmentation pipeline (baseline for ablation)
+python -m ssrl_ecg.train_ssl_simclr --config full --epochs 20
+
+# Remove frequency warping
+python -m ssrl_ecg.train_ssl_simclr --config no-frequency-warp --epochs 20
+
+# Remove medical mixup
+python -m ssrl_ecg.train_ssl_simclr --config no-mixup --epochs 20
+
+# Remove bandpass filtering
+python -m ssrl_ecg.train_ssl_simclr --config no-bandpass --epochs 20
+
+# Remove segment CutMix
+python -m ssrl_ecg.train_ssl_simclr --config no-cutmix --epochs 20
+
+# Remove motion artifacts
+python -m ssrl_ecg.train_ssl_simclr --config no-motion --epochs 20
+
+# Remove per-channel noise
+python -m ssrl_ecg.train_ssl_simclr --config no-channel-noise --epochs 20
+
+# Remove temporal dropout
+python -m ssrl_ecg.train_ssl_simclr --config no-temporal-dropout --epochs 20
+```
+
+<Tip>
+  The full augmentation pipeline yields **+12.15% F1** over the supervised baseline (0.5750 → 0.6448). Frequency warping and per-channel noise tend to have the largest individual contributions for ECG data.
+</Tip>
+
+---
+
+## Comparing SimCLR and BYOL
+
+<Accordion title="When to choose SimCLR">
+  SimCLR is the recommended choice. It trains faster (20 epochs vs 30), achieves higher AUROC (0.8717 vs 0.8565), and its temperature hyperparameter is easy to tune. The NT-Xent loss benefits from large batch sizes — use `--batch-size 256` or higher where GPU memory allows.
+</Accordion>
+
+<Accordion title="When to choose BYOL">
+  BYOL is a strong alternative when batch size is constrained (e.g., on a single GPU with limited VRAM). Because it does not rely on in-batch negatives, smaller batches do not degrade the signal the same way they do for SimCLR. The EMA momentum (`--momentum-tau`) is the key hyperparameter to tune.
+</Accordion>
+
+---
+
+## Next Steps
+
+Once pretraining completes, pass the checkpoint to the fine-tuning script to train a classification head on labeled data.
+
+<CardGroup cols={2}>
+  <Card title="Fine-Tuning" icon="sliders" href="/training/fine-tuning">
+    Train a linear classifier on top of the pretrained encoder using 10% of PTB-XL labels.
+  </Card>
+  <Card title="Supervised Baseline" icon="chart-line" href="/training/supervised-baseline">
+    Compare SSL against a CNN trained from scratch to measure the SSL gain.
+  </Card>
+</CardGroup>

@@ -1,0 +1,95 @@
+---
+title: "SSRL-ECG: Self-Supervised ECG Classification Framework"
+sidebarTitle: "Introduction"
+description: "SSRL-ECG applies SimCLR and BYOL with domain-adaptive ECG augmentations to achieve 0.8717 AUROC on PTB-XL using only 10% labeled data."
+---
+
+SSRL-ECG is a self-supervised representation learning framework purpose-built for ECG-based cardiovascular disease classification under low-data conditions. By leveraging unlabeled ECG signals during pretraining, the framework learns rich cardiac representations that generalize effectively even when only 10% of labeled data is available for fine-tuning — addressing one of the most persistent bottlenecks in clinical AI: the scarcity of expert-annotated recordings.
+
+## The Problem: Limited Labeled ECG Data
+
+Annotating ECG recordings for multi-class cardiovascular disease requires trained cardiologists, making large labeled datasets expensive and slow to produce. Standard supervised models trained on small labeled subsets struggle to generalize, producing unreliable predictions across the five major diagnostic classes. SSRL-ECG tackles this by pretraining on the full unlabeled corpus first, then fine-tuning on a fraction of labeled samples.
+
+## The Solution: Self-Supervised Pretraining with Domain-Adaptive Augmentations
+
+SSRL-ECG pairs two well-established SSL frameworks — **SimCLR** (contrastive learning) and **BYOL** (momentum-based self-distillation) — with a suite of seven augmentations that are grounded in ECG physiology rather than borrowed from computer vision. These augmentations expose the encoder to realistic signal variations it will encounter in clinical practice, including heart rate fluctuations, electrode motion artifacts, and bandlimited noise.
+
+## Key Results
+
+The table below compares SSL-pretrained models against a fully supervised CNN baseline, all evaluated on the PTB-XL held-out test fold (fold 10) with 10% labeled training data.
+
+| Method | AUROC | F1 | Sensitivity | Specificity |
+|---|---|---|---|---|
+| Supervised (Focal + Oversample) | 0.8606 | 0.5750 | 0.6772 | 0.9357 |
+| **SimCLR + Augmentations** | **0.8717** | **0.6448** | **0.6831** | **0.9411** |
+| BYOL + Augmentations | 0.8565 | 0.6301 | 0.6648 | 0.9278 |
+
+SimCLR achieves a **+12.15% F1 improvement** over the supervised baseline and outperforms BYOL by 0.0152 AUROC. Multi-seed validation across 10 random seeds confirms robustness: **AUROC 0.8717 ± 0.0032** (95% CI: 0.8671–0.8763).
+
+## Domain-Adaptive Augmentations
+
+The seven augmentations in `ssrl_ecg/augmentations.py` are designed specifically for 12-lead ECG signals and applied probabilistically during SSL pretraining to generate two correlated views of each recording.
+
+| Augmentation | Mechanism | Application Rate |
+|---|---|---|
+| Frequency warping | ±5% heart rate variation | 50% |
+| Medical mixup | ECG-aware blending (λ ~ Beta distribution) | 40% |
+| Bandpass filtering | f_low ∈ [0.5, 1.5] Hz, f_high ∈ [40, 60] Hz | 30% |
+| Segment CutMix | 10–30% temporal masking | 25% |
+| Motion artifacts | Baseline wander at 0.5–2 Hz, 0.01–0.05 mV | 20% |
+| Per-channel noise | 0.5–2% per-channel standard deviation | 60% |
+| Temporal dropout | 5–20% masking with interpolation | 30% |
+
+## Primary Dataset: PTB-XL
+
+SSRL-ECG is evaluated on **PTB-XL**, the largest openly available clinical ECG dataset. The standard 10-fold split is used: folds 1–8 for training (17,489 samples), fold 9 for validation (2,154 samples), and fold 10 for testing (2,194 samples).
+
+<CardGroup cols={2}>
+  <Card title="Dataset Size" icon="database">
+    21,799 ECGs from 18,869 patients — 12-lead recordings at 500 Hz, 10 seconds each.
+  </Card>
+  <Card title="5 Cardiovascular Classes" icon="heart-pulse">
+    NORM (9,514) · MI (5,469) · STTC (5,235) · CD (4,898) · HYP (2,649)
+  </Card>
+  <Card title="Class Imbalance" icon="chart-bar">
+    3.32× imbalance ratio (NORM vs. HYP). Addressed via oversampling and Focal Loss during fine-tuning.
+  </Card>
+  <Card title="Secondary Dataset" icon="flask">
+    MIT-BIH arrhythmia database (48 records) used as an external robustness check for transfer validation.
+  </Card>
+</CardGroup>
+
+## Project Module Structure
+
+The package lives under `src/ssrl_ecg/` and is organized into focused modules. Each module is independently importable once the package is installed.
+
+<CardGroup cols={2}>
+  <Card title="augmentations.py" icon="wand-magic-sparkles">
+    Core module implementing all 7 domain-adaptive ECG augmentations with physiological grounding.
+  </Card>
+  <Card title="train_ssl_simclr.py" icon="bolt">
+    SimCLR pretraining — NT-Xent contrastive loss, ECGEncoder1DCNN backbone, dual augmented views per sample.
+  </Card>
+  <Card title="train_ssl_byol.py" icon="rotate">
+    BYOL pretraining — momentum encoder with exponential moving average updates, no negative pairs required.
+  </Card>
+  <Card title="train_finetune.py" icon="sliders">
+    Linear probing fine-tuner — loads a pretrained encoder checkpoint and trains a classification head on labeled data.
+  </Card>
+  <Card title="train_supervised.py" icon="chalkboard">
+    Supervised CNN baseline — trains from scratch with Focal Loss and oversampling for fair comparison.
+  </Card>
+  <Card title="evaluate.py" icon="chart-line">
+    Comprehensive evaluation reporting AUROC, macro-F1, sensitivity, specificity, and per-class metrics.
+  </Card>
+  <Card title="data/ptbxl.py" icon="file-waveform">
+    PTB-XL dataset loader — handles 10-fold splits, label encoding, and stratified label-fraction sampling.
+  </Card>
+  <Card title="models/cnn.py" icon="microchip">
+    ECGEncoder1DCNN — three stacked Conv1D layers producing a 256-dimensional latent representation.
+  </Card>
+</CardGroup>
+
+<Note>
+  SSRL-ECG ships as an installable Python package. All training scripts run as `python -m ssrl_ecg.<module_name>` — no manual `sys.path` manipulation required. See the [Installation guide](/installation) to get set up.
+</Note>

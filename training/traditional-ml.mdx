@@ -1,0 +1,261 @@
+---
+title: "ECG Classification with Traditional Machine Learning"
+sidebarTitle: "Traditional ML"
+description: "Classify PTB-XL cardiovascular diseases using handcrafted ECG features with Random Forest or XGBoost. Fast prototyping and interpretable baselines without deep learning."
+---
+
+Traditional machine learning offers a fast, interpretable starting point for ECG classification before committing to deep learning infrastructure. SSRL-ECG includes `train_traditional_ml.py`, which extracts 24+ handcrafted per-lead statistical and spectral features from each 12-lead ECG recording and fits a multi-label Random Forest or XGBoost classifier on a labeled subset of PTB-XL. No GPU is required, training typically completes in minutes, and feature importances are directly inspectable.
+
+<Tip>
+  Traditional ML is most useful for **rapid prototyping**, **interpretability audits**, and **low-compute environments**. It establishes a feature-engineering baseline that highlights how much representation learning (supervised CNN or SSL) adds on top of handcrafted features.
+</Tip>
+
+---
+
+## Feature Extraction
+
+Each 12-lead ECG is converted to a fixed-length feature vector by `extract_ecg_features()`. Features are computed per-lead and collected into a flat dictionary that becomes a row in a pandas DataFrame.
+
+### Per-Lead Statistics (5 features, computed on lead 0)
+
+| Feature | Formula |
+|---|---|
+| `mean` | `np.mean(lead)` |
+| `std` | `np.std(lead)` |
+| `max` | `np.max(lead)` |
+| `min` | `np.min(lead)` |
+| `range` | `np.ptp(lead)` (peak-to-peak) |
+
+### Gradient Features (2 features)
+
+Computed from the first-order difference of lead 0, serving as a rough QRS proxy:
+
+| Feature | Formula |
+|---|---|
+| `mean_gradient` | `np.mean(np.abs(np.diff(lead)))` |
+| `max_gradient` | `np.max(np.abs(np.diff(lead)))` |
+
+### Energy and Entropy (2 features)
+
+| Feature | Formula |
+|---|---|
+| `energy` | `np.sum(lead²)` |
+| `entropy` | `−Σ p × log(p)` where `p = lead² / Σ(lead² + ε)` |
+
+### Zero-Crossing Rate (1 feature)
+
+Zero crossings relative to the signal mean act as a simple heart rate proxy:
+
+| Feature | Formula |
+|---|---|
+| `zero_crossings` | Count of sign changes in `lead − mean(lead)` |
+
+### Per-Lead RMS (12 features)
+
+For multi-lead inputs, RMS energy is computed independently for each of the 12 leads:
+
+| Feature | Formula |
+|---|---|
+| `rms_lead_0` … `rms_lead_11` | `√(mean(lead_i²))` for i ∈ [0, 11] |
+
+**Total feature vector size**: 5 + 2 + 2 + 1 + 12 = **22 features** (plus the single `rms` fallback for 1-lead inputs).
+
+All features are standardized with `StandardScaler` (zero mean, unit variance) before being passed to the classifier.
+
+---
+
+## Classifiers
+
+<Tabs>
+  <Tab title="Random Forest">
+    Random Forest (`--model rf`) fits an ensemble of 100 decision trees with maximum depth 15. It uses all available CPU cores (`n_jobs=-1`) and supports multi-output classification natively via `RandomForestClassifier`.
+
+    ```bash
+    python -m ssrl_ecg.train_traditional_ml \
+      --data-root data/PTB-XL \
+      --label-fraction 0.1 \
+      --model rf \
+      --seed 42
+    ```
+
+    Internal configuration:
+
+    ```python
+    from sklearn.ensemble import RandomForestClassifier
+
+    model = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=15,
+        random_state=args.seed,
+        n_jobs=-1,
+    )
+    ```
+
+    Random Forest is the default (`--model rf`) and requires no additional dependencies beyond scikit-learn.
+  </Tab>
+
+  <Tab title="XGBoost">
+    XGBoost (`--model xgb`) fits gradient-boosted trees with 100 estimators, max depth 5, and learning rate 0.1. If XGBoost is not installed, the script automatically falls back to Random Forest with a console warning.
+
+    ```bash
+    python -m ssrl_ecg.train_traditional_ml \
+      --data-root data/PTB-XL \
+      --label-fraction 0.1 \
+      --model xgb \
+      --seed 42
+    ```
+
+    Internal configuration:
+
+    ```python
+    import xgboost as xgb
+
+    model = xgb.XGBClassifier(
+        n_estimators=100,
+        max_depth=5,
+        learning_rate=0.1,
+        random_state=args.seed,
+        n_jobs=-1,
+    )
+    ```
+
+    Install XGBoost if needed:
+
+    ```bash
+    pip install xgboost
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## CLI Arguments
+
+<ParamField path="--data-root" type="Path" default="data/PTB-XL">
+  Root directory of the PTB-XL dataset. Must contain `ptbxl_database.csv`, `scp_statements.csv`, and `records100/` with `.hea`/`.dat` ECG records.
+</ParamField>
+
+<ParamField path="--label-fraction" type="float" default="0.1">
+  Fraction of the PTB-XL training split (folds 1–8) to use for fitting the classifier. `0.1` corresponds to approximately 1,747 samples, matching the labeled data budget used by the deep learning baselines for a fair comparison.
+</ParamField>
+
+<ParamField path="--seed" type="int" default="42">
+  Random seed passed to `np.random.seed()` and to the classifier's `random_state`. Controls which samples are drawn by `sample_labelled_indices` and the internal tree-building randomness.
+</ParamField>
+
+<ParamField path="--model" type="str" default="rf">
+  Which classifier to train. Choices:
+
+  - `rf` — `RandomForestClassifier(n_estimators=100, max_depth=15)`. No extra dependencies.
+  - `xgb` — `XGBClassifier(n_estimators=100, max_depth=5, lr=0.1)`. Requires `xgboost` package; falls back to RF if not available.
+</ParamField>
+
+---
+
+## Training Pipeline
+
+<Steps>
+  <Step title="Load metadata and splits">
+    `load_ptbxl_metadata` reads the PTB-XL CSV files. `make_default_splits` partitions into train (folds 1–8), val (fold 9), and test (fold 10) using the standard PTB-XL protocol.
+  </Step>
+  <Step title="Sample labeled training indices">
+    `sample_labelled_indices` stratifies the training fold and returns `label_fraction × N` indices, matching the low-data regime used by CNN and SSL baselines.
+  </Step>
+  <Step title="Extract features for all splits">
+    Each ECG signal is loaded via `PTBXLRecordDataset`, converted to a NumPy array, and passed to `extract_ecg_features()`. The result is a pandas DataFrame with one row per sample. Missing values are filled with 0.
+  </Step>
+  <Step title="Standardize features">
+    `StandardScaler` is fit on the training set only. The same scaler transforms validation and test sets to prevent data leakage.
+  </Step>
+  <Step title="Fit the classifier">
+    `model.fit(X_train, y_train)` where `y_train` is the multi-label binary matrix of shape `(n_samples, 5)`.
+  </Step>
+  <Step title="Evaluate on validation and test sets">
+    Per-class AUROC and macro-F1 are printed for both splits. No checkpoint is saved — re-run the script to reproduce results.
+  </Step>
+</Steps>
+
+---
+
+## Feature Extraction Code
+
+The full `extract_ecg_features` function from `train_traditional_ml.py`:
+
+```python
+import numpy as np
+
+def extract_ecg_features(signal: np.ndarray, sampling_rate: int = 100) -> dict:
+    """Extract handcrafted ECG features from a single 12-lead record."""
+    features = {}
+
+    # Per-lead statistics (lead 0)
+    lead = signal[0] if signal.ndim > 1 else signal
+    features["mean"]  = float(np.mean(lead))
+    features["std"]   = float(np.std(lead))
+    features["max"]   = float(np.max(lead))
+    features["min"]   = float(np.min(lead))
+    features["range"] = float(np.ptp(lead))
+
+    # Gradient features (QRS proxy)
+    diff = np.diff(lead)
+    features["mean_gradient"] = float(np.mean(np.abs(diff)))
+    features["max_gradient"]  = float(np.max(np.abs(diff)))
+
+    # Energy and entropy
+    features["energy"]  = float(np.sum(lead ** 2))
+    features["entropy"] = float(
+        -np.sum(
+            (lead**2 / np.sum(lead**2 + 1e-10))
+            * np.log(lead**2 / np.sum(lead**2 + 1e-10) + 1e-10)
+        )
+    )
+
+    # Zero-crossing rate (heart rate proxy)
+    zero_crossings = np.sum(np.diff(np.sign(lead - np.mean(lead))) != 0)
+    features["zero_crossings"] = float(zero_crossings)
+
+    # Per-lead RMS (all 12 leads)
+    if signal.ndim > 1:
+        for i in range(min(12, signal.shape[0])):
+            features[f"rms_lead_{i}"] = float(np.sqrt(np.mean(signal[i] ** 2)))
+    else:
+        features["rms"] = float(np.sqrt(np.mean(lead ** 2)))
+
+    return features
+```
+
+---
+
+## When to Use Traditional ML
+
+<CardGroup cols={2}>
+  <Card title="Fast Prototyping" icon="bolt">
+    No GPU required. Training and evaluation complete in minutes even on a laptop. Ideal for quickly validating dataset loading, preprocessing, and label quality before investing in deep learning training runs.
+  </Card>
+  <Card title="Interpretability" icon="magnifying-glass">
+    Random Forest feature importances reveal which statistical properties (energy, zero crossings, per-lead RMS) are most discriminative for each disease class. Useful for clinical hypothesis generation.
+  </Card>
+  <Card title="Low-Resource Deployment" icon="microchip">
+    The fitted scikit-learn model can be serialized with `joblib` and deployed on edge devices or servers without PyTorch or GPU drivers.
+  </Card>
+  <Card title="Baseline Benchmark" icon="chart-bar">
+    Establishes a feature-engineering floor. The gap between traditional ML and the SSL-pretrained CNN quantifies how much end-to-end representation learning adds beyond hand-designed features.
+  </Card>
+</CardGroup>
+
+<Warning>
+  Traditional ML baselines do not use the Focal Loss or oversampling strategies available in the deep learning pipeline. Class imbalance affects RF and XGBoost differently — consider setting `class_weight="balanced"` in `RandomForestClassifier` for fairer comparison on minority classes.
+</Warning>
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Supervised CNN Baseline" icon="network-wired" href="/training/supervised-baseline">
+    Train the CNN from scratch to see the gain from end-to-end deep feature learning over handcrafted features.
+  </Card>
+  <Card title="SSL Pretraining" icon="brain" href="/training/ssl-pretraining">
+    Pretrain with SimCLR or BYOL to push performance beyond both traditional ML and supervised CNN baselines.
+  </Card>
+</CardGroup>
