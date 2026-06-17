@@ -67,17 +67,17 @@ Weak augmentations are intentionally mild — they perturb the signal just enoug
 
 The strong-augmentation branch fires with probability `prob_strong` (default 0.8). When active, all nine strong transforms are applied in sequence, each with its own internal application rate. This creates high augmentation diversity while leaving 20% of samples with only weak perturbations, preserving some easy positive pairs for training stability.
 
-### The 7 Domain-Specific Techniques
+### The Domain-Specific Strong Techniques
 
 | Augmentation | Mechanism | Physiological Simulation | Rate |
 |---|---|---|---|
 | **Frequency warping** | Non-linear time-index remapping via random control points (±5% jitter) | Natural heart rate variability (±5 bpm) across the recording | 50% |
-| **Medical mixup** | Convex combination `λx + (1−λ)x'`, λ ~ Beta(0.2, 0.2), with random within-batch partner | Averaged readings from patients with similar pathologies | 40% |
-| **Bandpass filtering** | FFT-domain mask with random `f_low ∈ [0.5, 1.5] Hz`, `f_high ∈ [40, 60] Hz` | Different recording devices with non-identical frequency responses | 30% |
-| **Segment CutMix** | Replace a 10–30% contiguous time window with the corresponding window from a random batch partner | Stitched recordings, electrode switching mid-session | 25% |
-| **Motion artifacts** | Sinusoidal baseline wander (0.01–0.05 mV amplitude @ 0.5–2 Hz) plus a high-frequency noise burst | Patient movement, loose electrode contact, respiratory artifact | 20% |
-| **Per-channel noise** | Independent Gaussian noise per lead with level drawn uniformly from [0.5%, 2%] of per-channel std | Differential contact resistance across 12 electrode sites | 60% |
-| **Temporal dropout** | Zero-out (fill with batch mean) a contiguous 5–20% segment; multiple segments possible | Signal interruptions, sensor dropouts, transmission loss | 30% |
+| **Medical mixup** | Convex combination `λx + (1−λ)x'`, λ ~ Beta(0.1, 0.1), with random within-batch partner | Averaged readings from patients with similar pathologies | 40% |
+| **Bandpass filtering** | FFT-domain mask with random `f_low ∈ [0, 5] Hz`, `f_high ∈ [50, 250] Hz` | Different recording devices with non-identical frequency responses | 50% |
+| **Segment CutMix** | Replace a 10–30% contiguous time window with the corresponding window from a random batch partner | Stitched recordings, electrode switching mid-session | 30% |
+| **Motion artifacts** | Sinusoidal baseline wander (amplitude ~ Uniform(0.5, 2.0) @ 0.5–2 Hz) plus a high-frequency noise burst | Patient movement, loose electrode contact, respiratory artifact | 50% |
+| **Segment cropping** | Remove a contiguous 10–30% window and interpolate linearly across the gap | Missing data, electrode contact loss, transmission dropout | 50% |
+| **Temporal dropout** | Zero-out (fill with batch mean) a contiguous segment; multiple segments possible | Signal interruptions, sensor dropouts, transmission loss | 50% |
 
 <Accordion title="Frequency Warping — Implementation Detail">
   `_time_warp()` creates a smooth non-linear index mapping using randomly placed control points. The endpoint positions are fixed (no boundary artifacts), while interior waypoints are jittered by up to ±5% of the signal length. The mapping is computed via `np.interp`, then applied as an integer index gather — no learnable parameters are involved.
@@ -95,18 +95,18 @@ The strong-augmentation branch fires with probability `prob_strong` (default 0.8
 </Accordion>
 
 <Accordion title="Medical Mixup — Implementation Detail">
-  `_augment_mixup()` samples `λ` from a symmetric Beta(0.2, 0.2) distribution, which concentrates weight near 0 and 1 (most mixes are dominated by one sample). A random within-batch permutation selects the mixing partner. Unlike image mixup, ECG mixup is physiologically plausible: a blended waveform resembles a composite of overlapping cardiac conditions.
+  `_augment_mixup()` samples `λ` from a symmetric Beta(0.1, 0.1) distribution, which concentrates weight near 0 and 1 (most mixes are dominated by one sample). A random within-batch permutation selects the mixing partner. Unlike image mixup, ECG mixup is physiologically plausible: a blended waveform resembles a composite of overlapping cardiac conditions.
 
   ```python
   # Simplified logic from _augment_mixup()
-  lam = torch.distributions.Beta(alpha, alpha).sample().item()  # alpha=0.2
+  lam = torch.distributions.Beta(alpha, alpha).sample().item()  # alpha=0.1
   idx = torch.randperm(batch)
   x_mixed = lam * x + (1 - lam) * x[idx]
   ```
 </Accordion>
 
 <Accordion title="Motion Artifacts — Implementation Detail">
-  `_augment_motion_artifacts()` injects 1–3 artifact bursts per sample. Each burst combines a low-frequency sinusoidal baseline shift (modeling slow body movement or respiratory drift at 0.5–2 Hz) with an additive high-frequency noise burst (std=0.3, modeling rapid electrode motion). Amplitude is drawn from `Uniform(0.01, 0.05)` mV, matching realistic ambulatory ECG noise profiles.
+  `_augment_motion_artifacts()` injects 1–3 artifact bursts per sample. Each burst combines a low-frequency sinusoidal baseline shift (modeling slow body movement or respiratory drift at 0.5–2 Hz) with an additive high-frequency noise burst (std=0.3, modeling rapid electrode motion). Amplitude is drawn from `Uniform(0.5, 2.0)`, matching realistic ambulatory ECG noise profiles.
 </Accordion>
 
 ---

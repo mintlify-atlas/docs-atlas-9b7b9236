@@ -1,7 +1,7 @@
 ---
 title: "ContrastiveAugmentationPipeline for SSL View Pairs"
 sidebarTitle: "Contrastive Pipeline"
-description: "Reference for ContrastiveAugmentationPipeline, a thin wrapper around ECGAugmentations that exposes a clean interface for generating SSL view pairs in DataLoaders."
+description: "Reference for ContrastiveAugmentationPipeline, a thin wrapper around ECGAugmentations that generates SSL view pairs for DataLoader pretraining pipelines."
 ---
 
 `ContrastiveAugmentationPipeline` is a lightweight wrapper around [`ECGAugmentations`](/api/augmentations/ecg-augmentations) that provides a clean, named entry-point for contrastive self-supervised learning pipelines. It accepts the same constructor arguments and produces the same `(view1, view2)` output, but signals intent clearly in training code — making it the preferred class to reference in dataset classes and training loops.

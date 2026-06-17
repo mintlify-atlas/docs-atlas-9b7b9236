@@ -108,7 +108,7 @@ After each gradient step, the target network weights are updated with EMA:
 target_param.data = tau * target_param.data + (1 - tau) * online_param.data
 ```
 
-With `momentum-tau = 0.99`, the target network changes very slowly — a slow-moving teacher prevents representational collapse without any explicit negative pairs.
+With `momentum-tau = 0.999`, the target network changes very slowly — a slow-moving teacher prevents representational collapse without any explicit negative pairs.
 
 ### BYOL Loss
 
@@ -131,7 +131,7 @@ The symmetric formulation ensures both views contribute equally to the gradient 
 | **Loss type** | NT-Xent (cross-entropy over similarities) | Normalized regression (L2) |
 | **Negative pairs required** | Yes — all other batch samples | No — target network prevents collapse |
 | **Temperature parameter** | τ = 0.07 | — |
-| **Momentum parameter** | — | τ = 0.99 |
+| **Momentum parameter** | — | τ = 0.999 |
 | **Projection dim** | 128 | 256 |
 | **Recommended batch size** | 128 | 256 |
 | **PTB-XL AUROC (10% labels)** | **0.8717** | 0.8565 |

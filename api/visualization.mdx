@@ -1,10 +1,10 @@
 ---
 title: "Publication-Quality Visualization for ECG Experiments"
 sidebarTitle: "Visualization"
-description: "Reference for SSRL-ECG visualization utilities: set_publication_style for consistent matplotlib rcParams and plot_roc_curve for multi-model ROC comparison figures."
+description: "Reference for SSRL-ECG visualization utilities: set_publication_style for consistent figure rcParams and plot_roc_curve for ROC comparison figures."
 ---
 
-The `ssrl_ecg.visualization` module provides two focused utilities for producing consistent, publication-ready figures from ECG classification experiments. `set_publication_style` configures matplotlib globally so that every subsequent figure shares the same typographic and aesthetic standards. `plot_roc_curve` renders a labelled ROC curve on any axes object, handling both binary and multi-class inputs automatically.
+The `ssrl_ecg.visualization` module provides utilities for producing consistent, publication-ready figures from ECG classification experiments. This page documents `set_publication_style`, which configures matplotlib globally so that every subsequent figure shares the same typographic and aesthetic standards, and `plot_roc_curve`, which renders a labelled ROC curve on any axes object, handling both binary and multi-class inputs automatically.
 
 ```python
 from ssrl_ecg.visualization import set_publication_style, plot_roc_curve

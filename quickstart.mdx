@@ -1,5 +1,5 @@
 ---
-title: "Get started with SSRL-ECG in 4 steps"
+title: "Get Started with SSRL-ECG: End-to-End Pipeline Guide"
 sidebarTitle: "Quickstart"
 description: "Run the full SSRL-ECG pipeline end-to-end: SSL pretraining with SimCLR, label-efficient fine-tuning, and evaluation — achieving 0.8717 AUROC on PTB-XL."
 ---
@@ -82,7 +82,7 @@ This guide walks you through the complete SSRL-ECG workflow from a freshly insta
     ```
 
     <Tip>
-      **SimCLR is the recommended framework.** It achieves 0.8717 AUROC — higher than BYOL (0.8565) and the supervised baseline (0.8606). If you prefer to experiment with BYOL, replace the command with `python -m ssrl_ecg.train_ssl_byol --data-root data/PTB-XL --epochs 30 --batch-size 256 --momentum-tau 0.99 --seed 42 --out checkpoints/ssl_byol_enhanced.pt`.
+      **SimCLR is the recommended framework.** It achieves 0.8717 AUROC — higher than BYOL (0.8565) and the supervised baseline (0.8606). If you prefer to experiment with BYOL, replace the command with `python -m ssrl_ecg.train_ssl_byol --data-root data/PTB-XL --epochs 30 --batch-size 256 --seed 42 --out checkpoints/ssl_byol_enhanced.pt`.
     </Tip>
 
     <Warning>

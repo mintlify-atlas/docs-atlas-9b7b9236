@@ -1,7 +1,7 @@
 ---
-title: "ECG Encoder: 1D CNN Backbone & Classifiers"
+title: "ECG Encoder: 1D CNN Backbone and Classifier Models"
 sidebarTitle: "ECG Encoder"
-description: "Core 1D CNN building blocks for ECG feature extraction: ConvBlock, ECGEncoder1DCNN, ECGClassifier, and SSLReconstructionModel."
+description: "Core 1D CNN building blocks for ECG feature extraction: ConvBlock, ECGEncoder1DCNN, ECGClassifier, and SSLReconstructionModel from ssrl_ecg.models.cnn."
 ---
 
 The ECG encoder module provides the foundational backbone for all downstream tasks in SSRL-ECG. It defines a six-layer 1D convolutional encoder that maps raw multi-lead ECG signals to dense temporal feature maps, along with a supervised classifier head and a masked-reconstruction pretraining model. All classes live in `ssrl_ecg.models.cnn`.
@@ -199,10 +199,10 @@ optimizer.step()
 The decoder mirrors the encoder's 8× downsampling using three `ConvTranspose1d` layers (each with stride 2), followed by a final `Conv1d` that projects back to `in_ch` leads:
 
 ```
-ConvTranspose1d(c, c/2, k=4, s=2)  →  ReLU
-ConvTranspose1d(c/2, c/4, k=4, s=2)  →  ReLU
-ConvTranspose1d(c/4, c/8, k=4, s=2)  →  ReLU
-Conv1d(c/8, in_ch, k=3)
+ConvTranspose1d(c, c/2, k=4, s=2, p=1)  →  ReLU
+ConvTranspose1d(c/2, c/4, k=4, s=2, p=1)  →  ReLU
+ConvTranspose1d(c/4, c/8, k=4, s=2, p=1)  →  ReLU
+Conv1d(c/8, in_ch, k=3, p=1)
 ```
 
 where `c = encoder.out_channels`. Output length is clamped or padded to exactly match the input length.

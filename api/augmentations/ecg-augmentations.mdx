@@ -114,7 +114,7 @@ The pipeline is divided into two sequential stages. The weak stage always runs; 
     | `_augment_bandpass_variation` | 0.5 | Device-specific frequency response (0.05–250 Hz range) — FFT-domain soft bandpass with random corner frequencies |
     | `_augment_segment_cropping` | 0.5 | Missing data, electrode contact loss — removes 10–30% of the signal and fills the gap with linear interpolation |
     | `_augment_mixup` | 0.4 | Averaged multi-session ECG readings — Beta(α, α) linear blend of two samples; requires batch > 1 |
-    | `_augment_cutmix` | 0.5 | Electrode switching or stitched recordings — replaces a random temporal segment with the matching segment from another sample; requires batch > 1 |
+    | `_augment_cutmix` | 0.3 | Electrode switching or stitched recordings — replaces a random temporal segment with the matching segment from another sample; requires batch > 1 |
     | `_augment_motion_artifacts` | 0.5 | Patient movement, baseline wander — injects 1–3 localised bursts of low-frequency sinusoid + high-frequency noise |
     | `_augment_channel_shift` | 0.6 | Electrode placement variance, inter-lead differences — applies an independent scale and DC offset to each lead |
   </Tab>
@@ -177,14 +177,14 @@ The pipeline is divided into two sequential stages. The weak stage always runs; 
     **Simulates:** Missing data windows due to electrode contact loss, corrupt storage blocks, or deliberate cropping of artefact-heavy regions in preprocessing pipelines.
   </Accordion>
 
-  <Accordion title="_augment_mixup(x, alpha=0.2)">
+  <Accordion title="_augment_mixup(x, alpha=0.1)">
     Samples a mixing coefficient `λ ~ Beta(alpha, alpha)` and returns `λ·x + (1−λ)·x_shuffled` where `x_shuffled` is a randomly permuted copy of the batch. **Requires `batch > 1`**; silently skips otherwise. Applied with probability **0.4**.
 
     **Simulates:** Averaged multi-lead readings, physiologically plausible blends of two patients' signals in a shared recording environment, and label-space interpolation for multi-label classification.
   </Accordion>
 
-  <Accordion title="_augment_cutmix(x, cutmix_prob=0.5)">
-    Replaces a random temporal segment (spanning 10–33% of signal length) with the matching segment from a randomly selected other sample in the batch. **Requires `batch > 1`**. Applied with probability equal to `cutmix_prob` (default **0.5**).
+  <Accordion title="_augment_cutmix(x, cutmix_prob=0.3)">
+    Replaces a random temporal segment (spanning 10–33% of signal length) with the matching segment from a randomly selected other sample in the batch. **Requires `batch > 1`**. Applied with probability equal to `cutmix_prob` (called with **0.3** in the augmentation pipeline).
 
     **Simulates:** Electrode cross-talk, stitched recordings from different sessions, and segment-level annotation noise.
   </Accordion>

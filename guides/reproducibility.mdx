@@ -61,23 +61,22 @@ A single-seed result can be misleading due to lucky or unlucky weight initialisa
 <Tabs>
   <Tab title="Linux / macOS">
     ```bash
-    python scripts/run_multiseed_training.py \
-      --model simclr \
-      --seeds 42 52 62 72 82 92 102 112 122 132 \
-      --label-fraction 0.1
+    python scripts/train_supervised_multiseed.py
+    ```
+  </Tab>
+  <Tab title="Linux / macOS (quick — 3 seeds)">
+    ```bash
+    python scripts/train_supervised_multiseed.py --quick
     ```
   </Tab>
   <Tab title="Windows (PowerShell)">
     ```powershell
-    python scripts/run_multiseed_training.py `
-      --model simclr `
-      --seeds 42 52 62 72 82 92 102 112 122 132 `
-      --label-fraction 0.1
+    python scripts/train_supervised_multiseed.py
     ```
   </Tab>
 </Tabs>
 
-The script calls `set_seed(seed)` at the top of every training run, saves a per-seed checkpoint, and writes aggregate statistics to `results/phase2_multiseed_results.json`.
+The script iterates over all ten seeds, calls `set_seed(seed)` at the top of every training run, saves a per-seed checkpoint under `checkpoints/multiseed_<loss>_<strategy>_seed<NNN>.pt`, and writes aggregate statistics to `results/phase2_multiseed_results.json`. Pass `--quick` to do a fast 3-seed, 5-epoch smoke-test instead of the full 10-seed, 30-epoch run.
 
 ### Published Multi-Seed Results
 
@@ -154,7 +153,7 @@ print(f"95% CI: {ci_lower:.4f} – {ci_upper:.4f}")
 
 ## Statistical Significance Testing
 
-After collecting multi-seed results, use `scripts/statistical_tests.py` to compare methods and compute effect sizes.
+After collecting multi-seed results, use `scripts/statistical_tests.py` to compare methods and compute effect sizes. The script accepts `--results-dir`, `--baseline` (`supervised` or `ssl`), `--alpha`, and `--output-dir`, then initialises a `StatisticalTester` instance ready for comparison calls.
 
 ```bash
 python scripts/statistical_tests.py \
@@ -164,12 +163,12 @@ python scripts/statistical_tests.py \
   --output-dir analysis/statistical_tests
 ```
 
-The `StatisticalTester` class automatically:
+The `StatisticalTester` class exposes a `compare_methods()` helper that, for each metric:
 
 1. Runs a **Shapiro-Wilk normality test** on each group of scores.
 2. Selects a **paired t-test** when both groups are normally distributed, or a **Mann-Whitney U test** otherwise.
 3. Computes **Cohen's d** effect size (or rank-biserial correlation for the non-parametric path).
-4. Saves a formatted report and a significance-comparison plot to `--output-dir`.
+4. Returns a structured result dict; call `create_comparison_plots()` to write the significance-comparison plot to `--output-dir`.
 
 <CardGroup cols={2}>
   <Card title="Paired t-test" icon="chart-line">
@@ -250,8 +249,13 @@ python scripts/analyze_retraining_strategy.py --experiment all
   </Step>
   <Step title="Run statistical tests on collected results">
     ```bash
-    python scripts/statistical_tests.py --results-dir results/ --baseline supervised
+    python scripts/statistical_tests.py \
+      --results-dir results/ \
+      --baseline supervised \
+      --output-dir analysis/statistical_tests
     ```
+
+    This initialises the `StatisticalTester` with your chosen significance level and output directory. Load your per-seed metric arrays and call `tester.compare_methods()` to run Shapiro-Wilk normality checks and automatically select between a paired t-test (normal data) and Mann-Whitney U (non-normal data), then write the formatted report and comparison plot to `--output-dir`.
   </Step>
   <Step title="Compare against published CI: 0.8671–0.8763 AUROC">
     If your CI overlaps this range, your reproduction is statistically consistent with the paper.

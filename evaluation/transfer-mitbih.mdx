@@ -1,7 +1,7 @@
 ---
-title: "Transfer Evaluation on MIT-BIH Arrhythmia Dataset"
+title: "Transfer Evaluation on the MIT-BIH Arrhythmia Dataset"
 sidebarTitle: "MIT-BIH Transfer"
-description: "Evaluate SSRL-ECG's PTB-XL pretrained encoder on the MIT-BIH arrhythmia dataset to measure cross-dataset representation quality."
+description: "Evaluate SSRL-ECG's PTB-XL pretrained encoder on the MIT-BIH arrhythmia dataset to measure cross-dataset transfer and representation quality."
 ---
 
 Training a self-supervised encoder on PTB-XL teaches it to capture the temporal structure of 12-lead ECG signals. But how well do those learned representations generalise beyond PTB-XL? Transfer evaluation on the MIT-BIH arrhythmia dataset answers this question by applying the pretrained encoder — without retraining on PTB-XL labels — to an entirely different ECG corpus with its own patient population, acquisition hardware, and annotation scheme.
@@ -93,15 +93,15 @@ data/
 </ParamField>
 
 <ParamField path="--finetune-epochs" type="int" default="10">
-  Number of epochs for fine-tuning the classification head on MIT-BIH. The encoder remains frozen during this step unless `--freeze-encoder` is omitted.
+  Parsed by the argument parser but not used by the current `main()` implementation, which runs inference only. Reserved for future fine-tuning extensions.
 </ParamField>
 
 <ParamField path="--lr" type="float" default="1e-3">
-  Learning rate for the classification head optimiser (Adam).
+  Parsed by the argument parser but not used by the current `main()` implementation. Reserved for future fine-tuning extensions.
 </ParamField>
 
 <ParamField path="--freeze-encoder" type="flag">
-  When set, only the classification head is updated during fine-tuning. When absent, the full model is fine-tuned.
+  When set (and `--use-ssl` is not set), the encoder parameters have `requires_grad = False`. Has no effect on the inference output since `main()` does not run a training loop.
 </ParamField>
 
 <ParamField path="--use-ssl" type="flag">
